@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "docs"
+		},
+		{
+			"path": "evtx_parser"
+		},
+		{
+			"path": "ulp"
+		},
+		{
+			"path": "mft_parser"
+		}
+	],
+	"settings": {}
+}
