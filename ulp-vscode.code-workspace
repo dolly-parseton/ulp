@@ -11,6 +11,9 @@
 		},
 		{
 			"path": "mft_parser"
+		},
+		{
+			"path": "mongodb"
 		}
 	],
 	"settings": {}

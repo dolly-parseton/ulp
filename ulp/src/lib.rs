@@ -3,9 +3,13 @@ extern crate rocket;
 
 #[macro_use]
 extern crate lazy_static;
+#[macro_use]
+extern crate mongod;
 
-mod api_routes;
-mod queue;
+pub mod api_routes;
+pub mod mongodb;
+pub mod queue;
+pub mod type_map;
 
 use api_routes::{cleanup, download, upload};
 use std::env;
@@ -18,10 +22,4 @@ lazy_static! {
         env::var(UPLOAD_DIR_ENV).expect("No Enviroment variable for UPLOAD_DIR");
     static ref MONGODB_ADDRESS: String =
         env::var(MONGODB_ADDRESS_ENV).expect("No Enviroment variable for MONGODB_ADDRESS");
-}
-
-#[launch]
-fn rocket() -> _ {
-    cleanup();
-    rocket::build().mount("/", routes![download, upload])
 }

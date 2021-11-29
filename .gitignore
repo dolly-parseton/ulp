@@ -11,3 +11,7 @@
 
 # Exclude test data
 **/.test_data
+
+**/flamegraph**
+
+**/perf.data*

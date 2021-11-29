@@ -1,2 +1,5 @@
+[profile.release]
+debug = true
+
 [workspace]
 members = ["evtx_parser","ulp","mft_parser"]

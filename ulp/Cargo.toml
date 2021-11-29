@@ -12,3 +12,7 @@ uuid = { version = "0.8", features = ["v4"] }
 lazy_static = "1.4.0"
 futures = "0.3"
 mongod = { version = "0.3", features = ["derive"] }
+serde = {version = "1.0", features = ["derive"]}
+serde_json = {version = "1.0", features = ["preserve_order"]}
+chrono = {version = "0.4.19", features= ["serde"]}
+regex = "1.0"
