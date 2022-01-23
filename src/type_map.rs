@@ -21,27 +21,24 @@ impl Mapping {
         self.map.map_json(value, &mut self.change_log);
         // Get target field
         if let Some(target) = self.target.as_mut() {
-            match recurse_fields(&value, &target.parts, 0) {
-                Some(key) => {
-                    let key_s = key.to_string();
-                    // Might want to compare performance on push + dedup
-                    if !target.unique_variations.contains(&key_s) {
-                        target.unique_variations.push(key_s.clone());
-                    }
-                    let (map, changes) = self
-                        .targeted_mapping
-                        .entry(key_s)
-                        .or_insert((type_mapping::TypeMap::return_type(value), Vec::new()));
-                    map.map_json(value, changes);
+            if let Some(key) = recurse_fields(value, &target.parts, 0) {
+                let key_s = key.to_string();
+                // Might want to compare performance on push + dedup
+                if !target.unique_variations.contains(&key_s) {
+                    target.unique_variations.push(key_s.clone());
                 }
-                None => (),
+                let (map, changes) = self
+                    .targeted_mapping
+                    .entry(key_s)
+                    .or_insert((type_mapping::TypeMap::return_type(value), Vec::new()));
+                map.map_json(value, changes);
             }
         }
 
         //
         fn recurse_fields(
             value: &serde_json::Value,
-            target: &Vec<String>,
+            target: &[String],
             target_index: usize,
         ) -> Option<serde_json::Value> {
             if target_index == target.len() {
@@ -190,7 +187,7 @@ mod type_mapping {
                     }
                     TypeMap::Object(dominant_object)
                 }
-                (TypeMap::Object(left_object), _) => unimplemented!(),
+                (TypeMap::Object(_left_object), _) => unimplemented!(),
                 // Complex type cases
                 (TypeMap::IPv4, TypeMap::String) => TypeMap::String,
                 (TypeMap::IPv6, TypeMap::String) => TypeMap::String,
@@ -254,7 +251,7 @@ mod type_mapping {
                 map: &mut TypeMap,
                 changes: &mut Vec<TypeChange>,
             ) {
-                let mut p = match path {
+                let p = match path {
                     Some(p) => p,
                     None => "".to_string(),
                 };
@@ -262,7 +259,9 @@ mod type_mapping {
                     // Handle recursion on object collisions
                     (&JsonValue::Object(ref jm), TypeMap::Object(ref mut tm)) => {
                         for (jk, jv) in jm.iter() {
-                            let entry = tm.entry(jk.clone()).or_insert(TypeMap::return_type(jv));
+                            let entry = tm
+                                .entry(jk.clone())
+                                .or_insert_with(|| TypeMap::return_type(jv));
                             recurse(Some(format!("{}.{}", p, jk)), jv, entry, changes);
                         }
                     }
@@ -270,7 +269,7 @@ mod type_mapping {
                     // - TODO determine how to handle arrays with mutliple types (left to right dominance check on change or in post?)
                     (&JsonValue::Array(ref jm), TypeMap::Array(ref mut tm)) => {
                         for (ji, jv) in jm.iter().enumerate() {
-                            let entry = tm.entry(ji).or_insert(TypeMap::return_type(jv));
+                            let entry = tm.entry(ji).or_insert_with(|| TypeMap::return_type(jv));
                             recurse(Some(format!("{}.{}", p, ji)), jv, entry, changes);
                         }
                     }
@@ -282,7 +281,7 @@ mod type_mapping {
                             println!("Prev {:?}", (&v, &t));
                             println!("Change {:?} to {:?}", &t, &new_right);
                             changes.push(TypeChange {
-                                path: p.strip_prefix(".").unwrap().to_string(), // This unwrap will always succeed
+                                path: p.strip_prefix('.').unwrap().to_string(), // This unwrap will always succeed
                                 old_type: t.clone(),
                                 new_type: new_right.clone(),
                                 value: v.clone(),
@@ -299,10 +298,6 @@ mod type_mapping {
 mod type_casting {
     use super::type_mapping::TypeMap;
     use serde_json::Value as JsonValue;
-    use std::{
-        collections::BTreeMap,
-        net::{Ipv4Addr, Ipv6Addr},
-    };
     pub fn cast_to_type_map(value: &mut JsonValue, type_map: &TypeMap) {
         // Eq
         match (value, type_map) {

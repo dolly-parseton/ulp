@@ -6,22 +6,22 @@ use ulp::type_map::Mapping;
 mod parser;
 
 #[macro_use]
-extern crate mongod;
+// extern crate mongod;
+// use mongod::Mongo;
 
-#[derive(Bson, Mongo)]
-#[mongo(collection = "parsed", field, filter, update)]
+// #[derive(Debug, Serialize, Deserialize)]
 pub struct ParsedData {
     pub index_str: String,
-    pub data: Vec<u8>,
+    pub data: serde_json::Value,
 }
 
 fn main() {
     let now = std::time::Instant::now();
-    let client = mongod::blocking::ClientBuilder::new()
-        .uri("mongodb://root:example@localhost:27017/")
-        .database("mft")
-        .build()
-        .unwrap();
+    // let client = mongod::blocking::ClientBuilder::new()
+    //     .uri("mongodb://root:example@localhost:27017/")
+    //     .database("mft")
+    //     .build()
+    //     .unwrap();
     println!("Reading MFT!");
     let mut value = Mapping::default();
     // value.set_target(vec!["IsDeleted"]);
@@ -37,7 +37,7 @@ fn main() {
         // }
         data.push(ParsedData {
             index_str: "".to_string(),
-            data: json.to_string().as_bytes().to_vec(),
+            data: json,
         });
         first = false;
     }
@@ -51,7 +51,7 @@ fn main() {
                 batch.push(entry);
             }
         }
-        let res = client.insert(batch).unwrap();
+        // let res = client.insert(batch).unwrap();
         println!("{:#?}", "Send batch");
     }
     println!("Uploaded: {:#?} secs", now.elapsed().as_secs());

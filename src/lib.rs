@@ -1,21 +1,19 @@
 #[macro_use]
-extern crate rocket;
-
-#[macro_use]
 extern crate lazy_static;
-#[macro_use]
-extern crate mongod;
-
-pub mod api_routes;
-pub mod mongodb;
+extern crate log;
+//
+pub mod api;
+pub mod job;
+pub mod mft;
 pub mod queue;
 pub mod type_map;
 
-use api_routes::{cleanup, download, upload};
+pub use type_map::Mapping;
+
 use std::env;
 // Consts
-const UPLOAD_DIR_ENV: &'static str = "UPLOAD_DIR";
-const MONGODB_ADDRESS_ENV: &'static str = "MONGODB_ADDRESS";
+const UPLOAD_DIR_ENV: &str = "UPLOAD_DIR";
+const MONGODB_ADDRESS_ENV: &str = "MONGODB_ADDRESS";
 // Env Var Reads
 lazy_static! {
     static ref UPLOAD_DIR_PATH: String =
