@@ -1,22 +1,54 @@
-use std::{collections::HashMap, path::PathBuf};
+use glob::glob;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    {io, io::prelude::*},
+};
 use uuid::Uuid;
 
 #[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct Job {
     pub id: Uuid,
-    pub file_path: PathBuf,
-    pub parser_type: UlpParser,
+    pub paths: Vec<PathBuf>,
     pub status: Status,
 }
 
-impl From<PathBuf> for Job {
-    fn from(file_path: PathBuf) -> Self {
+impl From<&str> for Job {
+    fn from(path_glob: &str) -> Self {
         // Test file_path for parser_type
+        let mut paths = Vec::new();
+        for entry in glob(path_glob).expect("Failed to read glob pattern") {
+            match entry {
+                Ok(path) => paths.push(path),
+                Err(e) => eprintln!("{:?}", e),
+            }
+        }
         Job {
             id: Uuid::new_v4(),
-            file_path,
-            parser_type: UlpParser::default(),
+            paths,
             status: Status::default(),
+        }
+    }
+}
+
+#[derive(serde::Serialize, Debug, Clone, Default)]
+pub struct Task {
+    pub job_id: Uuid,
+    pub id: Uuid,
+    pub path: PathBuf,
+}
+
+impl Iterator for Job {
+    type Item = Task;
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.paths.pop() {
+            Some(path) => Some(Task {
+                job_id: self.id,
+                id: Uuid::new_v4(),
+                path,
+            }),
+            None => None,
         }
     }
 }
@@ -33,32 +65,12 @@ impl Default for Status {
     }
 }
 
-#[derive(serde::Serialize, Debug, Clone)]
-pub enum UlpParser {
-    Evtx,
-    Mft,
-    None,
-}
-
-impl Default for UlpParser {
-    fn default() -> Self {
-        Self::None
-    }
-}
-
-// #[derive(Debug, serde::Serialize, serde::Deserialize)]
-// pub struct Data {
-//     pub index_str: String,
-//     pub data: serde_json::Value,
-// }
-
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct IndexPatternFile(Vec<IndexPatternObject>);
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct IndexPatternObject {
     pub parts: Vec<(String, bool)>,
-    // pub parts: Vec<String>,
 }
 
 impl From<&str> for IndexPatternObject {
@@ -66,13 +78,7 @@ impl From<&str> for IndexPatternObject {
         let mut parts = Vec::new();
         for (i, part) in s.split_inclusive(&['{', '}'][..]).enumerate() {
             if part != "{" && part != "}" {
-                if i > 0
-                    && i != s
-                        .split_inclusive(&['{', '}'][..])
-                        .collect::<Vec<&str>>()
-                        .len()
-                        - 1
-                {
+                if i > 0 && i != s.split_inclusive(&['{', '}'][..]).count() - 1 {
                     if s.split_inclusive(&['{', '}'][..]).collect::<Vec<&str>>()[i - 1]
                         .ends_with('{')
                         && s.split_inclusive(&['{', '}'][..]).collect::<Vec<&str>>()[i + 1] == "}"
@@ -155,5 +161,26 @@ impl Data {
         //
         let keys = key.split('.').collect::<Vec<&str>>();
         recurse(&keys, &self.inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    #[test]
+    fn index_pattern_test() {
+        let pattern = super::IndexPatternObject::from("{{x.y}}_aaa_{{a.b}}_bbb");
+        println!("{:?}", pattern);
+        let data = crate::job::Data {
+            inner: json!({
+                "x": {
+                    "y": "apple"
+                },
+                "a": {
+                    "b": "pear"
+                }
+            }),
+        };
+        assert_eq!(data.generate_index_pattern(&pattern), "apple_aaa_pear_bbb");
     }
 }

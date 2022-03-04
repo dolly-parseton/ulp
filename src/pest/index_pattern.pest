@@ -1,8 +1,0 @@
-alpha = { 'a'..'z' | 'A'..'Z'}
-digit = { '0'..'9' }
-other = { "_" | "-" | "." | "*" }
-variable = { (alpha | digit | "." | "_" | "-")+ }
-variable_pattern = _{ "{{" ~ variable ~ "}}" }
-static_str = { (alpha | digit | other)+ }
-// 
-pattern = { (static_str | variable_pattern)+ }

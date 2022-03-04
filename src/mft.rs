@@ -38,9 +38,7 @@ impl ParserWrapper {
 
         for entry in self {
             let _json = serde_json::to_value(entry).unwrap();
-            write!(&mut file, "{}\n", _json.to_string())?;
-            // println!("{}", _json);
-            // value.map_json(&json);
+            writeln!(&mut file, "{}", _json.to_string())?;
         }
         Ok(())
     }

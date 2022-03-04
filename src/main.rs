@@ -1,104 +1,81 @@
-#[macro_use]
 extern crate log;
-extern crate ulp;
-
-#[macro_use]
 extern crate serde_json;
+extern crate ulp;
 // mod api;
 mod mft;
-
 //
-use std::sync::{mpsc, Arc, Mutex};
-use tokio::runtime::Runtime;
-use ulp::{api, job::UlpParser};
-use warp::Filter;
+use ulp::workerpool::Orchestrator;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     env_logger::init();
     // Create store
-    let job_store = api::Store::new();
-    // Start parsing runtime
-    let runtime = Arc::new(Runtime::new().unwrap());
-    // Start orchestration thread
-    let job_store_orchestration: api::Store<Option<ulp::job::Job>> = job_store.clone();
-    let (sender, recveiver) = mpsc::channel::<String>();
-    let sender_store = api::Store::from_t(Arc::new(Mutex::new(sender)));
+    // let job_store = api::Store::new();
+    let orchestrator = Orchestrator::default();
+    orchestrator.run_api().await;
+    // loop {}
+    // // Start parsing runtime
+    // let runtime = Arc::new(Runtime::new().unwrap());
+    // // Start orchestration thread
+    // let job_store_orchestration: api::Store<Option<ulp::job::Job>> = job_store.clone();
+    // let (sender, recveiver) = mpsc::channel::<String>();
+    // let sender_store = api::Store::from_t(Arc::new(Mutex::new(sender)));
 
-    // Debug stuff
-    // println!("{:?}", std::fs::read_dir("/").unwrap());
-    //
-
-    let pattern = ulp::job::IndexPatternObject::from("{{x.y}}aaa{{a.b}}bbb");
-    println!("{:?}", pattern);
-    // let pattern = ulp::job::IndexPatternObject::from("aaa{{x.y}}{{a.b}}bbb");
-    // println!("{:?}", pattern);
-    let data = ulp::job::Data {
-        inner: json!({
-            "x": {
-                "y": "!apple!"
-            },
-            "a": {
-                "b": "!pear!"
-            }
-        }),
-    };
-    println!("{:?}", data.generate_index_pattern(&pattern));
-    std::process::exit(1);
-    // Start API thread
-    runtime.spawn(async move {
-        info!("API starting...");
-        warp::serve(api::routes(&job_store, &sender_store).with(warp::log("ulp")))
-            .run(([0, 0, 0, 0], 3030))
-            .await;
-    });
-
-    let runtime_clone = runtime.clone();
-    runtime.block_on(async move {
-        info!("Orchestration thread ready!");
-        loop {
-            let message = match recveiver.recv() {
-                Ok(message) => message,
-                Err(_) => {
-                    error!("No message recieved");
-                    continue;
-                }
-            };
-            println!("{}", message);
-            // Read Job
-            let job: ulp::job::Job = match job_store_orchestration.inner.read() {
-                Ok(opt) => match &*opt {
-                    Some(job) => job.clone(),
-                    None => continue,
-                },
-                Err(e) => {
-                    error!("{}", e);
-                    continue;
-                }
-            };
-            println!("{:#?}", job);
-            // Action Job
-            match &job.parser_type {
-                UlpParser::Evtx => (),
-                UlpParser::Mft => {
-                    let mut parser = mft::ParserWrapper::from_path(&job.file_path).unwrap();
-                    parser.run(&[]).unwrap();
-                }
-                UlpParser::None => {
-                    let mut parser = mft::ParserWrapper::from_path(&job.file_path).unwrap();
-                    parser.run(&[]).unwrap();
-                }
-            }
-            // Create manifest file
-        }
-    });
-    error!("FAILED...");
     // // Start API thread
-    // runtime.block_on(async {
+    // runtime.spawn(async move {
     //     info!("API starting...");
     //     warp::serve(api::routes(&job_store, &sender_store).with(warp::log("ulp")))
     //         .run(([0, 0, 0, 0], 3030))
     //         .await;
     // });
+
+    // let runtime_clone = runtime.clone();
+    // runtime.block_on(async move {
+    //     info!("Orchestration thread ready!");
+    //     loop {
+    //         let message = match recveiver.recv() {
+    //             Ok(message) => message,
+    //             Err(_) => {
+    //                 error!("No message recieved");
+    //                 continue;
+    //             }
+    //         };
+    //         println!("{}", message);
+    //         // Read Job
+    //         let job: ulp::job::Job = match job_store_orchestration.inner.read() {
+    //             Ok(opt) => match &*opt {
+    //                 Some(job) => job.clone(),
+    //                 None => continue,
+    //             },
+    //             Err(e) => {
+    //                 error!("{}", e);
+    //                 continue;
+    //             }
+    //         };
+    //         println!("{:#?}", job);
+    //         // Action Job
+    //         // match &job.parser_type {
+    //         //     UlpParser::Evtx => (),
+    //         //     UlpParser::Mft => {
+    //         //         let mut parser = mft::ParserWrapper::from_path(&job.file_path).unwrap();
+    //         //         parser.run(&[]).unwrap();
+    //         //     }
+    //         //     UlpParser::None => {
+    //         //         let mut parser = mft::ParserWrapper::from_path(&job.file_path).unwrap();
+    //         //         parser.run(&[]).unwrap();
+    //         //     }
+    //         // }
+    //         // Create manifest file
+    //     }
+    // });
+    // error!("FAILED...");
+    // // // Start API thread
+    // // runtime.block_on(async {
+    // //     info!("API starting...");
+    // //     warp::serve(api::routes(&job_store, &sender_store).with(warp::log("ulp")))
+    // //         .run(([0, 0, 0, 0], 3030))
+    // //         .await;
+    // // });
 }
 
 // // #[derive(Debug, Serialize, Deserialize)]
