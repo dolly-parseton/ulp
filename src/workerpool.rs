@@ -27,6 +27,8 @@ mod orchestrator {
     #[derive(Clone)]
     pub struct Orchestrator {
         pub pool: Arc<Mutex<WorkerPool>>,
+        pub completed_queue: Queue<crate::job::Job>,
+        pub processing_queue: Queue<crate::job::Job>,
         pub worker_queue: Queue<crate::job::Job>,
         pub api_queue: Queue<String>,
         pub job_store: Store<Option<crate::job::Job>>,
@@ -36,6 +38,8 @@ mod orchestrator {
         fn default() -> Self {
             Self {
                 pool: Arc::new(Mutex::new(WorkerPool::new(*WORKERS_N))),
+                completed_queue: Queue::new(),
+                processing_queue: Queue::new(),
                 worker_queue: Queue::new(),
                 api_queue: Queue::new(),
                 job_store: Store::new(),
@@ -47,13 +51,14 @@ mod orchestrator {
         pub async fn run_api(&self) {
             let job_store = self.job_store.clone();
             let message_queue = self.api_queue.clone();
+            // Run Warp API
             tokio::spawn(async move {
                 println!("API starting...");
                 warp::serve(crate::api::routes(&job_store, &message_queue).with(warp::log("ulp")))
                     .run(([0, 0, 0, 0], 3030))
                     .await;
             });
-            //
+            // Run the thread for converting api messages to job messages
             let api_queue = self.api_queue.clone();
             let worker_queue = self.worker_queue.clone();
             spawn(move || loop {
@@ -63,16 +68,50 @@ mod orchestrator {
                 println!("{:?}", &job);
                 worker_queue.push(job);
             });
-            //
+            // Read in job messages from queue and push to workers as tasks (1 file = 1 task)
+            let processing_queue = self.processing_queue.clone();
             let worker_queue = self.worker_queue.clone();
             let pool = self.pool.clone();
             spawn(move || loop {
                 let worker_job = worker_queue.take();
-                for task in worker_job {
+                for task in worker_job.clone() {
+                    // iter consumes the job
                     pool.lock().unwrap().send_message(Message::Task(task));
                 }
+                processing_queue.push(worker_job);
             });
-            //
+            // Read the tasks coming back from the workers and match to jobs and track tasks returning
+            let processing_queue = self.processing_queue.clone();
+            let completed_queue = self.completed_queue.clone();
+            let pool_recveiver = self.pool.lock().unwrap().receiver.clone();
+            spawn(move || loop {
+                let message = pool_recveiver.lock().unwrap().recv().unwrap();
+
+                if let super::Message::Task(task) = message {
+                    // Match message to job in working queue
+                    for _ in 0..processing_queue.len() - 1 {
+                        let mut working_job = processing_queue.take();
+                        // Is len of Sent == len of Processed?
+                        if working_job.sent.len() == working_job.processed.len() {
+                            println!("Confirmed job {} has finished processing. Sent: {} == Processed: {}", &working_job.id ,&working_job.sent.len(), &working_job.processed.len());
+                            completed_queue.push(working_job);
+                            break;
+                        }
+
+                        // Is message id in working_job.sent
+                        if working_job.sent.contains(&task.id) {
+                            println!("Confirmed task {} has finished processing", &task.id);
+                            working_job.processed.push(task);
+                            processing_queue.push(working_job);
+                            break; // Uuid ensures ther is only one match so break here is safe
+                        } else {
+                            processing_queue.push(working_job);
+                        }
+                    }
+                }
+            });
+            println!("Entering main loop");
+            // Loop on status of workers, eventually to be replaced with optional CLI GUI for non-docker runs
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(1));
                 println!(
@@ -87,7 +126,7 @@ mod orchestrator {
 mod pool {
     use super::queue::Queue;
     use std::{
-        collections::HashMap,
+        collections::BTreeMap,
         path::PathBuf,
         sync::{mpsc, Arc, Mutex},
         thread::spawn,
@@ -148,10 +187,9 @@ mod pool {
                             // Log details and start
                             println!("Processing task ({:?}): {:?}", id, &task);
                             // Do the task / process the file
-
                             use std::convert::TryFrom;
                             if let Ok(parser) = Parser::try_from(&task.path) {
-                                parser.run_parser(&task.path);
+                                parser.run_parser(&task);
                             }
 
                             println!("Finished task ({:?}): {:?}", id, &task);
@@ -214,8 +252,8 @@ mod pool {
             }
         }
         //
-        pub fn status_map(&self) -> HashMap<uuid::Uuid, Option<PathBuf>> {
-            let mut map = HashMap::new();
+        pub fn status_map(&self) -> BTreeMap<uuid::Uuid, Option<PathBuf>> {
+            let mut map = BTreeMap::new();
             for worker in &self.workers {
                 map.insert(worker.id, worker.get_status());
             }
@@ -224,6 +262,10 @@ mod pool {
         //
         pub fn send_message(&mut self, message: message::Message) {
             self.queue.push(message);
+        }
+        //
+        pub fn recv_message(&mut self) -> message::Message {
+            self.receiver.lock().unwrap().recv().unwrap()
         }
     }
     //

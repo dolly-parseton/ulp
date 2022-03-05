@@ -1,57 +1,131 @@
 use std::collections::BTreeMap;
 
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct IndexPatternObject {
+    pub parts: Vec<(String, bool)>,
+}
+
+impl From<&str> for IndexPatternObject {
+    fn from(s: &str) -> Self {
+        let mut parts = Vec::new();
+        for (i, part) in s.split_inclusive(&['{', '}'][..]).enumerate() {
+            if part != "{" && part != "}" {
+                if i > 0 && i != s.split_inclusive(&['{', '}'][..]).count() - 1 {
+                    if s.split_inclusive(&['{', '}'][..]).collect::<Vec<&str>>()[i - 1]
+                        .ends_with('{')
+                        && s.split_inclusive(&['{', '}'][..]).collect::<Vec<&str>>()[i + 1] == "}"
+                    {
+                        parts.push((part.trim_end_matches('}').to_string(), true));
+                    } else {
+                        parts.push((part.trim_end_matches('{').to_string(), false));
+                    }
+                } else {
+                    parts.push((part.trim_end_matches('{').to_string(), false));
+                }
+            }
+        }
+        Self { parts }
+    }
+}
+
+impl IndexPatternObject {
+    pub fn generate_index_pattern(&self, data: &serde_json::Value) -> String {
+        let mut path = String::new();
+        for (key, eval) in self.parts.iter() {
+            if *eval {
+                match get_value(&data, key) {
+                    None => path.push_str("NONE"),
+                    Some(v) => {
+                        use serde_json::Value::*;
+                        match v {
+                            Array(_) => path.push_str("ARRAY"),
+                            Object(_) => path.push_str("OBJECT"),
+                            _ => {
+                                if let Some(s) = v.as_str() {
+                                    path.push_str(s)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                path.push_str(key);
+            }
+        }
+        path
+    }
+}
+
+fn get_value<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    fn recurse<'a>(keys: &[&str], data: &'a serde_json::Value) -> Option<&'a serde_json::Value> {
+        if let Some(key) = keys.get(0) {
+            match key.parse::<usize>() {
+                Ok(i) => {
+                    if let Some(value) = data.get(i) {
+                        return recurse(&keys[1..], value);
+                    }
+                }
+                Err(_) => {
+                    if let Some(value) = data.get(key) {
+                        return recurse(&keys[1..], value);
+                    }
+                }
+            }
+        } else {
+            return Some(data);
+        }
+        None
+    }
+    //
+    let keys = key.split('.').collect::<Vec<&str>>();
+    recurse(&keys, &value)
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct Mapping {
     pub map: type_mapping::TypeMap,
-    pub target: Option<Target>,
-    pub targeted_mapping: BTreeMap<String, (type_mapping::TypeMap, Vec<type_mapping::TypeChange>)>, // Key is unique value from delimiter
+    // pub index_pattern: IndexPatternObject,
+    pub index_pattern_mappings:
+        BTreeMap<String, (type_mapping::TypeMap, Vec<type_mapping::TypeChange>)>, // Key is unique value from delimiter
     pub change_log: Vec<type_mapping::TypeChange>,
 }
 
-impl Mapping {
-    pub fn set_target(&mut self, path_parts: Vec<&str>) {
-        self.target = Some(Target {
-            parts: path_parts.into_iter().map(|s| s.to_string()).collect(),
-            delimiter: ".".to_string(),
-            unique_variations: Vec::new(),
-        });
+impl From<&str> for Mapping {
+    fn from(s: &str) -> Self {
+        Self {
+            map: type_mapping::TypeMap::default(),
+            // index_pattern: IndexPatternObject::from(s),
+            index_pattern_mappings: BTreeMap::new(),
+            change_log: Vec::new(),
+        }
     }
-    pub fn map_json(&mut self, value: &serde_json::Value) {
+}
+
+impl Mapping {
+    pub fn map_json(&mut self, value: &serde_json::Value, index_pattern: &IndexPatternObject) {
         // Update global map
         self.map.map_json(value, &mut self.change_log);
-        // Get target field
-        if let Some(target) = self.target.as_mut() {
-            if let Some(key) = recurse_fields(value, &target.parts, 0) {
-                let key_s = key.to_string();
-                // Might want to compare performance on push + dedup
-                if !target.unique_variations.contains(&key_s) {
-                    target.unique_variations.push(key_s.clone());
-                }
-                let (map, changes) = self
-                    .targeted_mapping
-                    .entry(key_s)
-                    .or_insert((type_mapping::TypeMap::return_type(value), Vec::new()));
-                map.map_json(value, changes);
-            }
-        }
-
-        //
-        fn recurse_fields(
-            value: &serde_json::Value,
-            target: &[String],
-            target_index: usize,
-        ) -> Option<serde_json::Value> {
-            if target_index == target.len() {
-                return Some(value.clone());
-            }
-            if let Some(value) = value.get(&target[target_index]) {
-                return recurse_fields(value, target, target_index + 1);
-            }
-            None
-        }
+        // Index pattern
+        let pattern = index_pattern.generate_index_pattern(value);
+        let (map, changes) = self
+            .index_pattern_mappings
+            .entry(pattern)
+            .or_insert((type_mapping::TypeMap::return_type(value), Vec::new()));
+        map.map_json(value, changes);
     }
-    pub fn cast_json(&self, value: &mut serde_json::Value) {
-        type_casting::cast_to_type_map(value, &self.map);
+    pub fn cast_json(&self, value: &mut serde_json::Value, index_pattern: Option<&str>) {
+        match index_pattern {
+            None => type_casting::cast_to_type_map(value, &self.map),
+            Some(pattern) => {
+                let (map, _) = self.index_pattern_mappings.get(pattern).unwrap_or_else(|| {
+                    panic!(
+                        "Attempted to read index_pattern_mappings with key: {}. Does not exist",
+                        pattern
+                    )
+                });
+                type_casting::cast_to_type_map(value, &map)
+            }
+        }
     }
 }
 
@@ -327,5 +401,24 @@ mod type_casting {
                 _ => (),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    #[test]
+    fn index_pattern_test() {
+        let pattern = super::IndexPatternObject::from("{{x.y}}_aaa_{{a.b}}_bbb");
+        println!("{:?}", pattern);
+        let data = json!({
+            "x": {
+                "y": "apple"
+            },
+            "a": {
+                "b": "pear"
+            }
+        });
+        assert_eq!(pattern.generate_index_pattern(&data), "apple_aaa_pear_bbb");
     }
 }

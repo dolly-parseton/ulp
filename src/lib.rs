@@ -10,6 +10,7 @@ pub mod workerpool;
 
 pub use type_map::Mapping;
 
+use job::Task;
 use std::{
     env, fs,
     io::{self, prelude::*},
@@ -20,8 +21,7 @@ const UPLOAD_DIR_ENV: &str = "UPLOAD_DIR";
 const MONGODB_ADDRESS_ENV: &str = "MONGODB_ADDRESS";
 // Env Var Reads
 lazy_static! {
-    static ref UPLOAD_DIR_PATH: String =
-        env::var(UPLOAD_DIR_ENV).expect("No Enviroment variable for UPLOAD_DIR");
+    static ref UPLOAD_DIR_PATH: String = env::var(UPLOAD_DIR_ENV).unwrap_or("/tmp".to_string());
     static ref MONGODB_ADDRESS: String =
         env::var(MONGODB_ADDRESS_ENV).expect("No Enviroment variable for MONGODB_ADDRESS");
 }
@@ -53,10 +53,14 @@ impl TryFrom<&PathBuf> for Parser {
 }
 
 impl Parser {
-    pub fn run_parser<P: AsRef<Path>>(&self, _path: P) -> () {
+    pub fn run_parser(&self, task: &Task) -> () {
+        use std::convert::TryFrom;
         match self {
             Self::Mft => {
+                println!("Creating MFT Parser");
+                let mut mft: mft::Parser = TryFrom::try_from(task).unwrap();
                 println!("Running MFT Parser");
+                mft.run("pattern".into());
             }
             _ => panic!("No Parser for this file"),
         }
