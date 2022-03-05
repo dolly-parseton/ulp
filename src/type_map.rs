@@ -33,7 +33,7 @@ impl IndexPatternObject {
         let mut path = String::new();
         for (key, eval) in self.parts.iter() {
             if *eval {
-                match get_value(&data, key) {
+                match get_value(data, key) {
                     None => path.push_str("NONE"),
                     Some(v) => {
                         use serde_json::Value::*;
@@ -78,27 +78,16 @@ fn get_value<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_js
     }
     //
     let keys = key.split('.').collect::<Vec<&str>>();
-    recurse(&keys, &value)
+    recurse(&keys, value)
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(serde::Serialize, Debug, Clone, Default)]
 pub struct Mapping {
     pub map: type_mapping::TypeMap,
     // pub index_pattern: IndexPatternObject,
     pub index_pattern_mappings:
         BTreeMap<String, (type_mapping::TypeMap, Vec<type_mapping::TypeChange>)>, // Key is unique value from delimiter
     pub change_log: Vec<type_mapping::TypeChange>,
-}
-
-impl From<&str> for Mapping {
-    fn from(s: &str) -> Self {
-        Self {
-            map: type_mapping::TypeMap::default(),
-            // index_pattern: IndexPatternObject::from(s),
-            index_pattern_mappings: BTreeMap::new(),
-            change_log: Vec::new(),
-        }
-    }
 }
 
 impl Mapping {
@@ -123,17 +112,10 @@ impl Mapping {
                         pattern
                     )
                 });
-                type_casting::cast_to_type_map(value, &map)
+                type_casting::cast_to_type_map(value, map)
             }
         }
     }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Target {
-    pub parts: Vec<String>,
-    pub delimiter: String,
-    pub unique_variations: Vec<String>,
 }
 
 mod type_mapping {
@@ -142,14 +124,14 @@ mod type_mapping {
         collections::BTreeMap,
         net::{Ipv4Addr, Ipv6Addr},
     };
-    #[derive(Debug, Clone)]
+    #[derive(serde::Serialize, Debug, Clone)]
     pub struct TypeChange {
         pub path: String,
         pub value: JsonValue,
         pub old_type: TypeMap,
         pub new_type: TypeMap,
     }
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq, Hash)]
     pub enum TypeMap {
         Null,
         Boolean,
@@ -183,18 +165,29 @@ mod type_mapping {
             match (left, right) {
                 // left Boolean
                 (TypeMap::Boolean, TypeMap::Null) => TypeMap::Boolean,
+                (TypeMap::Boolean, r) => r.clone(),
+                // (TypeMap::Boolean, TypeMap::UnsignedInteger) => TypeMap::UnsignedInteger, // Catch values where 0 or 1 moving to number
+                // (TypeMap::Boolean, TypeMap::SignedInteger) => TypeMap::SignedInteger, // Catch values where 0 or 1 moving to number
+                // (TypeMap::Boolean, TypeMap::String) => TypeMap::String, // Catch values where boolean and string
+                // (TypeMap::Boolean, TypeMap::IPv4) => TypeMap::String, // Catch values where boolean and string
+                // (TypeMap::Boolean, TypeMap::IPv6) => TypeMap::String, // Catch values where boolean and string
                 // left UnsignedInteger
                 (TypeMap::UnsignedInteger, TypeMap::Null) => TypeMap::UnsignedInteger,
                 (TypeMap::UnsignedInteger, TypeMap::Boolean) => TypeMap::UnsignedInteger, // Cast to bool to unsigned int
+                (TypeMap::UnsignedInteger, r) => r.clone(),
+                // (TypeMap::UnsignedInteger, TypeMap::String) => TypeMap::String, // !! This is to catch fields with hex and strings causing dominant type panic
                 // left SignedInteger
                 (TypeMap::SignedInteger, TypeMap::Null) => TypeMap::SignedInteger,
                 (TypeMap::SignedInteger, TypeMap::Boolean) => TypeMap::SignedInteger,
                 (TypeMap::SignedInteger, TypeMap::UnsignedInteger) => TypeMap::SignedInteger, // Cast unsigned int to signed int
+                (TypeMap::SignedInteger, r) => r.clone(),
+                // (TypeMap::SignedInteger, TypeMap::String) => TypeMap::String, // !! This is to catch fields with hex and strings causing dominant type panic
                 // left Double
                 (TypeMap::Double, TypeMap::Null) => TypeMap::Double,
                 (TypeMap::Double, TypeMap::Boolean) => TypeMap::Double,
                 (TypeMap::Double, TypeMap::UnsignedInteger) => TypeMap::Double, // Cast unsigned int to signed int
                 (TypeMap::Double, TypeMap::SignedInteger) => TypeMap::Double, // Cast signed int to float
+                (TypeMap::Double, r) => r.clone(),
                 // left IPv4 - Start of impossible conditions
                 (TypeMap::IPv4, TypeMap::Null) => TypeMap::IPv4,
                 // Defaulting to string for complex types
@@ -202,6 +195,7 @@ mod type_mapping {
                 (TypeMap::IPv4, TypeMap::UnsignedInteger) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv4, TypeMap::SignedInteger) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv4, TypeMap::Double) => TypeMap::String, // Casting could maybe be attempted here in practice
+                (TypeMap::IPv4, r) => r.clone(),
                 // left IPv6
                 (TypeMap::IPv6, TypeMap::Null) => TypeMap::IPv6,
                 // Defaulting to string for complex types
@@ -210,6 +204,7 @@ mod type_mapping {
                 (TypeMap::IPv6, TypeMap::SignedInteger) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv6, TypeMap::Double) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv6, TypeMap::IPv4) => TypeMap::String, // Casting could maybe be attempted here in practice
+                (TypeMap::IPv6, r) => r.clone(),
                 // left Date
                 (TypeMap::Date, TypeMap::Null) => TypeMap::Date,
                 // Defaulting to string for complex types
@@ -228,6 +223,12 @@ mod type_mapping {
                 (TypeMap::String, TypeMap::IPv4) => TypeMap::String,
                 (TypeMap::String, TypeMap::IPv6) => TypeMap::String,
                 (TypeMap::String, TypeMap::Date) => TypeMap::String,
+                (TypeMap::String, TypeMap::Array(_)) | (TypeMap::Array(_), TypeMap::String) => {
+                    TypeMap::String
+                }
+                (TypeMap::String, TypeMap::Object(_)) | (TypeMap::Object(_), TypeMap::String) => {
+                    TypeMap::String
+                }
                 // left Array
                 (TypeMap::Array(left_array), TypeMap::Null) => TypeMap::Array(left_array.clone()),
                 (TypeMap::Array(left_array), TypeMap::Array(right_array)) => {
@@ -263,8 +264,8 @@ mod type_mapping {
                 }
                 (TypeMap::Object(_left_object), _) => unimplemented!(),
                 // Complex type cases
-                (TypeMap::IPv4, TypeMap::String) => TypeMap::String,
-                (TypeMap::IPv6, TypeMap::String) => TypeMap::String,
+                // (TypeMap::IPv4, TypeMap::String) => TypeMap::String,
+                // (TypeMap::IPv6, TypeMap::String) => TypeMap::String,
                 (TypeMap::Date, TypeMap::String) => TypeMap::String,
                 // Null cases
                 // left Null
@@ -275,7 +276,7 @@ mod type_mapping {
                     if l == r {
                         return l.clone();
                     }
-                    println!("{:?}", (l, r));
+                    error!("Unimplemented type clash: {:?}", (l, r));
                     unimplemented!()
                 }
             }
@@ -291,10 +292,16 @@ mod type_mapping {
             }
         }
         pub fn map_number(value: &serde_json::Number) -> Self {
-            if value.is_u64() {
-                Self::UnsignedInteger
-            } else if value.is_i64() {
-                Self::SignedInteger
+            if let Some(v) = value.as_u64() {
+                match v {
+                    0 | 1 => Self::Boolean,
+                    _ => Self::UnsignedInteger,
+                }
+            } else if let Some(v) = value.as_i64() {
+                match v {
+                    0 | 1 => Self::Boolean,
+                    _ => Self::SignedInteger,
+                }
             } else {
                 Self::Double
             }
@@ -303,6 +310,11 @@ mod type_mapping {
             if value.to_ascii_lowercase() == "true" || value.to_ascii_lowercase() == "false" {
                 Self::Boolean
             // Push DTA code here, link the library for parsing variable types from a dictionary
+            } else if let Some(hex) = value.to_ascii_lowercase().strip_prefix("0x") {
+                match u64::from_str_radix(hex, 16).is_ok() {
+                    true => Self::UnsignedInteger,
+                    false => Self::String,
+                }
             } else if chrono::DateTime::parse_from_rfc3339(value).is_ok()
                 || chrono::DateTime::parse_from_rfc2822(value).is_ok()
                 || chrono::DateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.6fZ").is_ok()
@@ -349,11 +361,11 @@ mod type_mapping {
                     }
                     (v, t) => {
                         let left = TypeMap::return_type(v);
-                        // println!("Change {:?}", (&v, &t));
+                        debug!("Change {:?}", (&v, &t));
                         let new_right = TypeMap::get_dominant_type(&left, t);
                         if &left != t && left != TypeMap::Null && &new_right != t {
-                            println!("Prev {:?}", (&v, &t));
-                            println!("Change {:?} to {:?}", &t, &new_right);
+                            debug!("Prev {:?}", (&v, &t));
+                            debug!("Change {:?} to {:?}", &t, &new_right);
                             changes.push(TypeChange {
                                 path: p.strip_prefix('.').unwrap().to_string(), // This unwrap will always succeed
                                 old_type: t.clone(),

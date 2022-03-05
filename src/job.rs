@@ -4,7 +4,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
-    // {io, io::prelude::*},
+    time::Instant, // {io, io::prelude::*},
 };
 use uuid::Uuid;
 
@@ -15,13 +15,14 @@ pub struct Job {
     pub sent: Vec<Uuid>,
     pub processed: Vec<Task>,
     pub status: Status,
-    //
+    #[serde(skip)]
+    pub started: Instant,
     #[serde(skip)]
     pub mapping: Arc<Mutex<Mapping>>,
 }
 
-impl From<&str> for Job {
-    fn from(path_glob: &str) -> Self {
+impl Job {
+    pub fn from_glob(path_glob: &str) -> Option<Self> {
         // Test file_path for parser_type
         let mut paths = Vec::new();
         for entry in glob(path_glob).expect("Failed to read glob pattern") {
@@ -30,13 +31,17 @@ impl From<&str> for Job {
                 Err(e) => eprintln!("{:?}", e),
             }
         }
-        Job {
-            id: Uuid::new_v4(),
-            paths,
-            sent: Vec::new(),
-            processed: Vec::new(),
-            status: Status::default(),
-            mapping: Arc::new(Mutex::new(Mapping::default())),
+        match paths.is_empty() {
+            true => None,
+            false => Some(Self {
+                id: Uuid::new_v4(),
+                paths,
+                sent: Vec::new(),
+                processed: Vec::new(),
+                status: Status::default(),
+                started: Instant::now(),
+                mapping: Arc::new(Mutex::new(Mapping::default())),
+            }),
         }
     }
 }

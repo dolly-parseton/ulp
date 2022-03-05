@@ -7,6 +7,7 @@ mod orchestrator {
     use crate::{api::Store, job::Job};
 
     use std::{
+        fs,
         sync::{Arc, Mutex},
         thread::spawn,
     };
@@ -36,6 +37,7 @@ mod orchestrator {
 
     impl Default for Orchestrator {
         fn default() -> Self {
+            debug!("Creating default Orchestrator");
             Self {
                 pool: Arc::new(Mutex::new(WorkerPool::new(*WORKERS_N))),
                 completed_queue: Queue::new(),
@@ -48,12 +50,12 @@ mod orchestrator {
     }
 
     impl Orchestrator {
-        pub async fn run_api(&self) {
+        pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
             let job_store = self.job_store.clone();
             let message_queue = self.api_queue.clone();
             // Run Warp API
+            debug!("Spawning async Orchestrator API thread");
             tokio::spawn(async move {
-                println!("API starting...");
                 warp::serve(crate::api::routes(&job_store, &message_queue).with(warp::log("ulp")))
                     .run(([0, 0, 0, 0], 3030))
                     .await;
@@ -61,21 +63,27 @@ mod orchestrator {
             // Run the thread for converting api messages to job messages
             let api_queue = self.api_queue.clone();
             let worker_queue = self.worker_queue.clone();
-            spawn(move || loop {
+            debug!("Spawning Orchestrator API message reader thread");
+            let _api_message_handle = spawn(move || loop {
                 let message = api_queue.take();
-                println!("{}", &message);
-                let job = Job::from(message.as_str());
-                println!("{:?}", &job);
-                worker_queue.push(job);
+                match Job::from_glob(message.as_str()) {
+                    Some(job) => {
+                        debug!("Converted message: {} to job: {:?}", &message, &job);
+                        worker_queue.push(job);
+                    }
+                    None => error!("Failed to convert message to job: {}", &message),
+                }
             });
             // Read in job messages from queue and push to workers as tasks (1 file = 1 task)
             let processing_queue = self.processing_queue.clone();
             let worker_queue = self.worker_queue.clone();
             let pool = self.pool.clone();
-            spawn(move || loop {
+            debug!("Spawning Orchestrator Job reader / Task issuer thread");
+            let _job_task_handle = spawn(move || loop {
                 let worker_job = worker_queue.take();
                 for task in worker_job.clone() {
                     // iter consumes the job
+                    debug!("Sending Task ({}) to WorkerPool", task.id);
                     pool.lock().unwrap().send_message(Message::Task(task));
                 }
                 processing_queue.push(worker_job);
@@ -83,24 +91,24 @@ mod orchestrator {
             // Read the tasks coming back from the workers and match to jobs and track tasks returning
             let processing_queue = self.processing_queue.clone();
             let completed_queue = self.completed_queue.clone();
-            let pool_recveiver = self.pool.lock().unwrap().receiver.clone();
-            spawn(move || loop {
-                let message = pool_recveiver.lock().unwrap().recv().unwrap();
-
+            let pool_receiver = self.pool.lock().unwrap().receiver.clone();
+            debug!("Spawning Orchestrator Task receiver / Completed issuer thread");
+            let _task_recv_handle = spawn(move || loop {
+                let message = pool_receiver.lock().unwrap().recv().unwrap();
                 if let super::Message::Task(task) = message {
                     // Match message to job in working queue
-                    for _ in 0..processing_queue.len() - 1 {
+                    debug!("{} jobs in processing in queue", processing_queue.len());
+                    for _ in 0..processing_queue.len() {
                         let mut working_job = processing_queue.take();
                         // Is len of Sent == len of Processed?
                         if working_job.sent.len() == working_job.processed.len() {
-                            println!("Confirmed job {} has finished processing. Sent: {} == Processed: {}", &working_job.id ,&working_job.sent.len(), &working_job.processed.len());
+                            debug!("Confirmed job {} has finished processing.", working_job.id);
                             completed_queue.push(working_job);
                             break;
                         }
-
                         // Is message id in working_job.sent
                         if working_job.sent.contains(&task.id) {
-                            println!("Confirmed task {} has finished processing", &task.id);
+                            debug!("Confirmed task {} has finished processing", &task.id);
                             working_job.processed.push(task);
                             processing_queue.push(working_job);
                             break; // Uuid ensures ther is only one match so break here is safe
@@ -110,14 +118,59 @@ mod orchestrator {
                     }
                 }
             });
-            println!("Entering main loop");
             // Loop on status of workers, eventually to be replaced with optional CLI GUI for non-docker runs
+            info!("Entering main Orchestrator loop");
+            debug!("Spawning Orchestrator Main thread");
             loop {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                println!(
+                // Waiting on #![feature(thread_is_running)]
+                // if !api_message_handle.is_running() {
+                //     error!("Orchestrator API message thread has stopped");
+                //     panic!("Orchestrator API message thread has stopped");
+                // }
+                // if !job_task_handle.is_running() {
+                //     error!("Orchestrator Job to Task thread has stopped");
+                //     panic!("Orchestrator Job to Task thread has stopped");
+                // }
+                // if !task_recv_handle.is_running() {
+                //     error!("Orchestrator Task receiver thread has stopped");
+                //     panic!("Orchestrator Task receiver thread has stopped");
+                // }
+                //
+
+                // std::thread::sleep(std::time::Duration::from_secs(10));
+                debug!(
                     "{:#?}",
                     self.pool.lock().expect("Could not lock pool").status_map()
+                );
+
+                let completed = self.completed_queue.take();
+                let mapping = completed.mapping.lock().unwrap();
+                std::fs::create_dir_all(format!("{}/{}/", crate::UPLOAD_DIR_ENV, completed.id))
+                    .unwrap();
+                let mut mapping_file = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .open(format!(
+                        "{}/{}/{}",
+                        crate::UPLOAD_DIR_ENV,
+                        completed.id,
+                        "mappings.json"
+                    ))
+                    .unwrap();
+                use std::io::Write;
+                write!(
+                    &mut mapping_file,
+                    "{}",
+                    serde_json::to_string(&*mapping).unwrap().to_string()
                 )
+                .unwrap();
+                info!(
+                    "Completed Job {} in: {:?}\n\tFiles: {}",
+                    completed.id,
+                    completed.started.elapsed(),
+                    completed.paths.len()
+                );
             }
         }
     }
@@ -179,29 +232,27 @@ mod pool {
                     }
                     let task_wrapper = queue.take();
                     use super::message::Message::*;
-                    match &task_wrapper {
+                    match task_wrapper {
                         Task(task) => {
                             if let Ok(mut s) = status.lock() {
                                 *s = Some(task.path.clone())
                             }
                             // Log details and start
-                            println!("Processing task ({:?}): {:?}", id, &task);
+                            debug!("Processing task ({:?}): {:?}", id, &task);
                             // Do the task / process the file
-                            use std::convert::TryFrom;
                             if let Ok(parser) = Parser::try_from(&task.path) {
                                 parser.run_parser(&task);
                             }
-
-                            println!("Finished task ({:?}): {:?}", id, &task);
+                            debug!("Finished task ({:?}): {:?}", id, &task);
                             // Log finished details / send output
-                            let _ = output.send(task_wrapper).unwrap_or_else(|_| {
+                            let _ = output.send(Task(task)).unwrap_or_else(|_| {
                                 panic!("Worker {} failed to send results to orchestrator", id)
                             });
                         }
                         Debug(_) => {
-                            println!("Processing task ({:?}): {:?}", id, &task_wrapper);
+                            debug!("Processing task ({:?}): {:?}", id, &task_wrapper);
                             std::thread::sleep(std::time::Duration::from_millis(1));
-                            println!("Finished task ({:?}): {:?}", id, &task_wrapper);
+                            debug!("Finished task ({:?}): {:?}", id, &task_wrapper);
                             let _ = output.send(task_wrapper).unwrap_or_else(|_| {
                                 panic!("Worker {} failed to send results to orchestrator", id)
                             });
@@ -244,6 +295,7 @@ mod pool {
             for _i in 0..size {
                 workers.push(worker::Worker::new(queue.clone(), sender.clone()));
             }
+
             Self {
                 workers,
                 queue,

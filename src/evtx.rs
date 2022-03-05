@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use mft::csv::FlatMftEntryWithName;
+use evtx::ParserSettings;
 use std::{
     convert::TryFrom,
     error,
@@ -7,12 +7,11 @@ use std::{
     io::Write,
     sync::{Arc, Mutex},
 };
-type MftParser = mft::MftParser<std::io::BufReader<std::fs::File>>;
+type EvtxParser = evtx::EvtxParser<std::fs::File>;
 use crate::{job::Task, type_map::IndexPatternObject, type_map::Mapping};
 
 pub struct Parser {
-    pub parser: MftParser,
-    iter: Vec<FlatMftEntryWithName>,
+    pub parser: EvtxParser,
     //
     data_file: fs::File,
     mapping_ref: Arc<Mutex<Mapping>>,
@@ -32,17 +31,9 @@ impl TryFrom<&Task> for Parser {
                 task.job_id,
                 task.id
             ))?;
-        let mut parser: MftParser = MftParser::from_path(&task.path)?;
-        let entries = parser.iter_entries().collect::<Vec<_>>();
-        let mut iter = Vec::new();
-        for entry in entries {
-            match entry {
-                Ok(entry) => iter.push(FlatMftEntryWithName::from_entry(&entry, &mut parser)),
-                Err(err) => return Err(err.into()),
-            }
-        }
+        let parser = evtx::EvtxParser::from_path(&task.path)?
+            .with_configuration(ParserSettings::new().separate_json_attributes(true));
         Ok(Self {
-            iter,
             parser,
             data_file,
             mapping_ref: task.mapping_ref.clone(),
@@ -55,15 +46,22 @@ impl Parser {
         pattern: IndexPatternObject,
     ) -> Result<(), Box<dyn std::error::Error + '_>> {
         //  Iterate over inner parser object
-        for entry in &self.iter {
-            let json = serde_json::to_value(entry).unwrap();
-            writeln!(&mut self.data_file, "{}", json.to_string())?;
-            match self.mapping_ref.lock() {
-                Ok(mut mapping) => {
-                    mapping.map_json(&json, &pattern);
+        for record in self.parser.records_json_value() {
+            match record {
+                Ok(json) => {
+                    writeln!(&mut self.data_file, "{}", json.data.to_string())?;
+                    match self.mapping_ref.lock() {
+                        Ok(mut mapping) => {
+                            mapping.map_json(&json.data, &pattern);
+                        }
+                        Err(_err) => return Err("err".into()),
+                    }
                 }
-                Err(_err) => return Err("err".into()),
-            }
+                Err(e) => {
+                    error!("Unable to convert serialsied record to json: {}", e);
+                    panic!("Unable to convert serialsied record to json: {}", e);
+                }
+            };
         }
         Ok(())
     }
