@@ -4,13 +4,13 @@ extern crate lazy_static;
 extern crate log;
 //
 pub mod api;
+pub mod elastic;
+pub mod error;
 pub mod evtx;
 pub mod job;
 pub mod mft;
 pub mod type_map;
 pub mod workerpool;
-
-pub use type_map::Mapping;
 
 use job::Task;
 use std::{

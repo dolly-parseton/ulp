@@ -4,7 +4,11 @@ pub use queue::Queue;
 
 mod orchestrator {
     use super::*;
-    use crate::{api::Store, job::Job};
+    use crate::{
+        api::{ApiMessageType, Store},
+        job::Job,
+        type_map::Mapping,
+    };
 
     use std::{
         fs,
@@ -31,7 +35,7 @@ mod orchestrator {
         pub completed_queue: Queue<crate::job::Job>,
         pub processing_queue: Queue<crate::job::Job>,
         pub worker_queue: Queue<crate::job::Job>,
-        pub api_queue: Queue<String>,
+        pub api_queue: Queue<ApiMessageType>,
         pub job_store: Store<Option<crate::job::Job>>,
     }
 
@@ -52,26 +56,60 @@ mod orchestrator {
     impl Orchestrator {
         pub async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
             let job_store = self.job_store.clone();
-            let message_queue = self.api_queue.clone();
+            let api_queue = self.api_queue.clone();
             // Run Warp API
             debug!("Spawning async Orchestrator API thread");
             tokio::spawn(async move {
-                warp::serve(crate::api::routes(&job_store, &message_queue).with(warp::log("ulp")))
+                warp::serve(crate::api::routes(&job_store, &api_queue).with(warp::log("ulp")))
                     .run(([0, 0, 0, 0], 3030))
                     .await;
             });
             // Run the thread for converting api messages to job messages
             let api_queue = self.api_queue.clone();
             let worker_queue = self.worker_queue.clone();
+            let pool = self.pool.clone();
             debug!("Spawning Orchestrator API message reader thread");
             let _api_message_handle = spawn(move || loop {
-                let message = api_queue.take();
-                match Job::from_glob(message.as_str()) {
-                    Some(job) => {
-                        debug!("Converted message: {} to job: {:?}", &message, &job);
-                        worker_queue.push(job);
+                let message_wrapper = api_queue.take();
+                match message_wrapper {
+                    ApiMessageType::Job(message) => match Job::from_glob(message.as_str()) {
+                        Some(job) => {
+                            trace!("Converted message: {} to job: {:?}", &message, &job);
+                            worker_queue.push(job);
+                        }
+                        None => error!("Failed to convert message to job: {}", &message),
+                    },
+                    ApiMessageType::Elastic(uuid) => {
+                        info!("Elastic ingestion Job issued for uuid: {}", &uuid);
+                        // Read mapping into memory
+                        let target_dir = format!("{}/{}", crate::UPLOAD_DIR_ENV, uuid);
+                        let mapping: Mapping =
+                            match fs::read_to_string(format!("{}/{}", target_dir, "mappings.json"))
+                            {
+                                Ok(m) => serde_json::from_str(&m).unwrap(),
+                                Err(e) => {
+                                    error!(
+                                        "Failed to read mapping file at {}. {} ",
+                                        format!("{}/{}", target_dir, "mappings.json"),
+                                        e
+                                    );
+                                    panic!(
+                                        "Failed to read mapping file at {}. {}",
+                                        format!("{}/{}", target_dir, "mappings.json"),
+                                        e
+                                    )
+                                }
+                            };
+                        for entry in glob::glob(format!("{}/*.data", target_dir).as_str()).unwrap()
+                        {
+                            if let Ok(path) = entry {
+                                pool.lock().unwrap().send_message(Message::Elastic {
+                                    map: mapping.clone(),
+                                    data: path,
+                                });
+                            }
+                        }
                     }
-                    None => error!("Failed to convert message to job: {}", &message),
                 }
             });
             // Read in job messages from queue and push to workers as tasks (1 file = 1 task)
@@ -81,37 +119,58 @@ mod orchestrator {
             debug!("Spawning Orchestrator Job reader / Task issuer thread");
             let _job_task_handle = spawn(move || loop {
                 let worker_job = worker_queue.take();
-                for task in worker_job.clone() {
-                    // iter consumes the job
-                    debug!("Sending Task ({}) to WorkerPool", task.id);
-                    pool.lock().unwrap().send_message(Message::Task(task));
+                // Clone the job so we can send it to the worker
+                for task_res in worker_job.clone() {
+                    match task_res {
+                        Ok(task) => {
+                            debug!("Sending Task ({}) to WorkerPool", task.id);
+                            pool.lock().unwrap().send_message(Message::Task(task));
+                        }
+                        Err(e) => error!("Failed to derive task from job: {}", e),
+                    }
                 }
+                let sent_len = worker_job.sent.lock().unwrap().len();
+                info!(
+                    "Job {}: {} Tasks sent for processing.",
+                    worker_job.id, sent_len
+                );
                 processing_queue.push(worker_job);
             });
             // Read the tasks coming back from the workers and match to jobs and track tasks returning
             let processing_queue = self.processing_queue.clone();
             let completed_queue = self.completed_queue.clone();
             let pool_receiver = self.pool.lock().unwrap().receiver.clone();
+            let pool = self.pool.clone();
             debug!("Spawning Orchestrator Task receiver / Completed issuer thread");
             let _task_recv_handle = spawn(move || loop {
                 let message = pool_receiver.lock().unwrap().recv().unwrap();
                 if let super::Message::Task(task) = message {
+                    debug!("Task Message received from WorkerPool: {}", &task.id);
                     // Match message to job in working queue
-                    debug!("{} jobs in processing in queue", processing_queue.len());
-                    for _ in 0..processing_queue.len() {
+                    info!(
+                        "{} jobs in processing in queue",
+                        processing_queue.lock().len()
+                    );
+                    let len = processing_queue.lock().len();
+                    'queue: for _ in 0..len {
                         let mut working_job = processing_queue.take();
                         // Is len of Sent == len of Processed?
-                        if working_job.sent.len() == working_job.processed.len() {
-                            debug!("Confirmed job {} has finished processing.", working_job.id);
-                            completed_queue.push(working_job);
-                            break;
-                        }
                         // Is message id in working_job.sent
-                        if working_job.sent.contains(&task.id) {
-                            debug!("Confirmed task {} has finished processing", &task.id);
+                        let does_contain = working_job.sent.lock().unwrap().contains(&task.id);
+                        if does_contain {
+                            // println!("{:#?}", &task);
+                            info!("Confirmed task {} has finished processing", &task.id);
+                            info!("{} tasks waiting", pool.lock().unwrap().queue.lock().len());
                             working_job.processed.push(task);
+
+                            let sent_len = working_job.sent.lock().unwrap().len();
+                            if sent_len != 0 && sent_len == working_job.processed.len() {
+                                info!("Confirmed job {} has finished processing.", working_job.id);
+                                completed_queue.push(working_job);
+                                break 'queue;
+                            }
                             processing_queue.push(working_job);
-                            break; // Uuid ensures ther is only one match so break here is safe
+                            break 'queue; // Uuid ensures ther is only one match so break here is safe
                         } else {
                             processing_queue.push(working_job);
                         }
@@ -120,7 +179,6 @@ mod orchestrator {
             });
             // Loop on status of workers, eventually to be replaced with optional CLI GUI for non-docker runs
             info!("Entering main Orchestrator loop");
-            debug!("Spawning Orchestrator Main thread");
             loop {
                 // Waiting on #![feature(thread_is_running)]
                 // if !api_message_handle.is_running() {
@@ -142,8 +200,9 @@ mod orchestrator {
                     "{:#?}",
                     self.pool.lock().expect("Could not lock pool").status_map()
                 );
-
                 let completed = self.completed_queue.take();
+                // println!("{:#?}", completed);
+                // std::process::exit(1);
                 let mapping = completed.mapping.lock().unwrap();
                 std::fs::create_dir_all(format!("{}/{}/", crate::UPLOAD_DIR_ENV, completed.id))
                     .unwrap();
@@ -159,6 +218,7 @@ mod orchestrator {
                     ))
                     .unwrap();
                 use std::io::Write;
+                // println!("{:#?}", mapping);
                 write!(
                     &mut mapping_file,
                     "{}",
@@ -238,16 +298,20 @@ mod pool {
                                 *s = Some(task.path.clone())
                             }
                             // Log details and start
-                            debug!("Processing task ({:?}): {:?}", id, &task);
+                            trace!("Processing task ({:?}): {:?}", id, &task);
                             // Do the task / process the file
                             if let Ok(parser) = Parser::try_from(&task.path) {
                                 parser.run_parser(&task);
                             }
-                            debug!("Finished task ({:?}): {:?}", id, &task);
+                            trace!("Finished task ({:?}): {:?}", id, &task);
                             // Log finished details / send output
                             let _ = output.send(Task(task)).unwrap_or_else(|_| {
                                 panic!("Worker {} failed to send results to orchestrator", id)
                             });
+                        }
+                        Elastic { map, data } => {
+                            //
+                            crate::elastic::normalise_then_send(map, data).unwrap();
                         }
                         Debug(_) => {
                             debug!("Processing task ({:?}): {:?}", id, &task_wrapper);
@@ -264,11 +328,14 @@ mod pool {
     }
 
     pub mod message {
+        use crate::{job::Task, type_map::Mapping};
+        use std::path::PathBuf;
         //
         #[derive(Clone, Debug)]
         pub enum Message {
             Debug(i64),
-            Task(crate::job::Task),
+            Task(Task),
+            Elastic { map: Mapping, data: PathBuf },
         }
 
         impl From<i64> for Message {

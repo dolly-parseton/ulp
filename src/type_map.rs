@@ -1,3 +1,4 @@
+use crate::error::CustomError;
 use std::collections::BTreeMap;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -81,7 +82,7 @@ fn get_value<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_js
     recurse(&keys, value)
 }
 
-#[derive(serde::Serialize, Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct Mapping {
     pub map: type_mapping::TypeMap,
     // pub index_pattern: IndexPatternObject,
@@ -102,19 +103,30 @@ impl Mapping {
             .or_insert((type_mapping::TypeMap::return_type(value), Vec::new()));
         map.map_json(value, changes);
     }
-    pub fn cast_json(&self, value: &mut serde_json::Value, index_pattern: Option<&str>) {
+    pub fn cast_json(
+        &self,
+        value: &mut serde_json::Value,
+        index_pattern: Option<&str>,
+    ) -> Result<(), CustomError> {
         match index_pattern {
-            None => type_casting::cast_to_type_map(value, &self.map),
+            None => type_casting::cast_to_type_map(value, &self.map)?,
             Some(pattern) => {
-                let (map, _) = self.index_pattern_mappings.get(pattern).unwrap_or_else(|| {
-                    panic!(
-                        "Attempted to read index_pattern_mappings with key: {}. Does not exist",
-                        pattern
-                    )
-                });
-                type_casting::cast_to_type_map(value, map)
+                let (map, _) = match self.index_pattern_mappings.get(pattern) {
+                    Some(m) => m,
+                    None => {
+                        return Err(CustomError::TypeCastError(
+                            format!(
+                            "Attempted to read index_pattern_mappings with key: {}. Does not exist",
+                            pattern
+                        )
+                            .into(),
+                        ))
+                    }
+                };
+                type_casting::cast_to_type_map(value, map)?
             }
         }
+        Ok(())
     }
 }
 
@@ -124,14 +136,14 @@ mod type_mapping {
         collections::BTreeMap,
         net::{Ipv4Addr, Ipv6Addr},
     };
-    #[derive(serde::Serialize, Debug, Clone)]
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
     pub struct TypeChange {
         pub path: String,
         pub value: JsonValue,
         pub old_type: TypeMap,
         pub new_type: TypeMap,
     }
-    #[derive(serde::Serialize, Clone, Debug, PartialEq, Eq, Hash)]
+    #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
     pub enum TypeMap {
         Null,
         Boolean,
@@ -383,35 +395,44 @@ mod type_mapping {
 
 mod type_casting {
     use super::type_mapping::TypeMap;
+    use crate::error::CustomError;
     use serde_json::Value as JsonValue;
-    pub fn cast_to_type_map(value: &mut JsonValue, type_map: &TypeMap) {
+    pub fn cast_to_type_map(value: &mut JsonValue, type_map: &TypeMap) -> Result<(), CustomError> {
         // Eq
         match (value, type_map) {
-            (JsonValue::Null, TypeMap::Null) => (),
-            (JsonValue::Bool(_), TypeMap::Boolean) => (),
-            (JsonValue::Number(_), TypeMap::UnsignedInteger) => (),
-            (JsonValue::Number(_), TypeMap::SignedInteger) => (),
-            (JsonValue::Number(_), TypeMap::Double) => (),
-            (JsonValue::String(_), TypeMap::String) => (),
-            (JsonValue::String(_), TypeMap::Date) => (),
-            (JsonValue::String(_), TypeMap::IPv4) => (),
-            (JsonValue::String(_), TypeMap::IPv6) => (),
+            (JsonValue::Null, TypeMap::Null) => Ok(()),
+            (JsonValue::Bool(_), TypeMap::Boolean) => Ok(()),
+            (JsonValue::Number(_), TypeMap::UnsignedInteger) => Ok(()),
+            (JsonValue::Number(_), TypeMap::SignedInteger) => Ok(()),
+            (JsonValue::Number(_), TypeMap::Double) => Ok(()),
+            (JsonValue::String(_), TypeMap::String) => Ok(()),
+            (JsonValue::String(_), TypeMap::Date) => Ok(()),
+            (JsonValue::String(_), TypeMap::IPv4) => Ok(()),
+            (JsonValue::String(_), TypeMap::IPv6) => Ok(()),
             // Not Eq
-            (v, t) => match (v, t) {
-                (JsonValue::Array(array), TypeMap::Array(ref tm)) => {
-                    for (i, v) in array.iter_mut().enumerate() {
-                        let entry = tm.get(&i).unwrap();
-                        cast_to_type_map(v, entry);
+            (v, t) => {
+                match (v, t) {
+                    (JsonValue::Array(array), TypeMap::Array(ref tm)) => {
+                        for (i, v) in array.iter_mut().enumerate() {
+                            match tm.get(&i) {
+                                Some(entry) => cast_to_type_map(v, entry)?,
+                                None => return Err(CustomError::TypeCastError("Attempted to cast a field value to a type no mapping exists for.".into())),
+                            }
+                        }
+                        Ok(())
                     }
-                }
-                (JsonValue::Object(object), TypeMap::Object(ref tm)) => {
-                    for (k, v) in object.iter_mut() {
-                        let entry = tm.get(k).unwrap();
-                        cast_to_type_map(v, entry);
+                    (JsonValue::Object(object), TypeMap::Object(ref tm)) => {
+                        for (k, v) in object.iter_mut() {
+                            match  tm.get(k) {
+                                Some(entry) => cast_to_type_map(v, entry)?,
+                                None => return Err(CustomError::TypeCastError("Attempted to cast a field value to a type no mapping exists for.".into())),
+                            }
+                        }
+                        Ok(())
                     }
+                    _ => Ok(()),
                 }
-                _ => (),
-            },
+            }
         }
     }
 }

@@ -1,4 +1,4 @@
-use crate::type_map::Mapping;
+use crate::{error::CustomError, type_map::Mapping};
 use glob::glob;
 use std::{
     collections::HashMap,
@@ -12,13 +12,14 @@ use uuid::Uuid;
 pub struct Job {
     pub id: Uuid,
     pub paths: Vec<PathBuf>,
-    pub sent: Vec<Uuid>,
     pub processed: Vec<Task>,
     pub status: Status,
     #[serde(skip)]
     pub started: Instant,
     #[serde(skip)]
     pub mapping: Arc<Mutex<Mapping>>,
+    #[serde(skip)]
+    pub sent: Arc<Mutex<Vec<Uuid>>>,
 }
 
 impl Job {
@@ -36,7 +37,7 @@ impl Job {
             false => Some(Self {
                 id: Uuid::new_v4(),
                 paths,
-                sent: Vec::new(),
+                sent: Arc::new(Mutex::new(Vec::new())),
                 processed: Vec::new(),
                 status: Status::default(),
                 started: Instant::now(),
@@ -57,19 +58,28 @@ pub struct Task {
 }
 
 impl Iterator for Job {
-    type Item = Task;
+    type Item = Result<Task, CustomError>;
     fn next(&mut self) -> Option<Self::Item> {
         match self.paths.pop() {
             Some(path) => {
                 // Track iterated tasks
                 let task_id = Uuid::new_v4();
-                self.sent.push(task_id);
-                Some(Task {
+                match self.sent.lock() {
+                    Ok(mut sent) => {
+                        sent.push(task_id);
+                    }
+                    Err(e) => {
+                        return Some(Err(CustomError::ParserRunError(
+                            format!("Unable to lock 'sent' Mutex in Job. {}", e).into(),
+                        )))
+                    }
+                }
+                Some(Ok(Task {
                     job_id: self.id,
                     id: task_id,
                     path,
                     mapping_ref: self.mapping.clone(),
-                })
+                }))
             }
             None => None,
         }

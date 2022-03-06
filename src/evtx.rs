@@ -2,13 +2,12 @@
 use evtx::ParserSettings;
 use std::{
     convert::TryFrom,
-    error,
     fs::{self, OpenOptions},
     io::Write,
     sync::{Arc, Mutex},
 };
 type EvtxParser = evtx::EvtxParser<std::fs::File>;
-use crate::{job::Task, type_map::IndexPatternObject, type_map::Mapping};
+use crate::{error::CustomError, job::Task, type_map::IndexPatternObject, type_map::Mapping};
 
 pub struct Parser {
     pub parser: EvtxParser,
@@ -18,9 +17,10 @@ pub struct Parser {
 }
 
 impl TryFrom<&Task> for Parser {
-    type Error = Box<dyn error::Error>;
+    type Error = CustomError;
     fn try_from(task: &Task) -> Result<Self, Self::Error> {
-        std::fs::create_dir_all(format!("{}/{}/", crate::UPLOAD_DIR_ENV, task.job_id)).unwrap();
+        std::fs::create_dir_all(format!("{}/{}/", crate::UPLOAD_DIR_ENV, task.job_id))
+            .map_err(|e| CustomError::ParserRunError(e.into()))?;
         let data_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -30,8 +30,10 @@ impl TryFrom<&Task> for Parser {
                 crate::UPLOAD_DIR_ENV,
                 task.job_id,
                 task.id
-            ))?;
-        let parser = evtx::EvtxParser::from_path(&task.path)?
+            ))
+            .map_err(|e| CustomError::ParserRunError(e.into()))?;
+        let parser = evtx::EvtxParser::from_path(&task.path)
+            .map_err(|e| CustomError::ParserRunError(e.into()))?
             .with_configuration(ParserSettings::new().separate_json_attributes(true));
         Ok(Self {
             parser,
@@ -41,27 +43,25 @@ impl TryFrom<&Task> for Parser {
     }
 }
 impl Parser {
-    pub fn run(
-        &mut self,
-        pattern: IndexPatternObject,
-    ) -> Result<(), Box<dyn std::error::Error + '_>> {
+    pub fn run(&mut self, pattern: IndexPatternObject) -> Result<(), CustomError> {
         //  Iterate over inner parser object
         for record in self.parser.records_json_value() {
-            match record {
-                Ok(json) => {
-                    writeln!(&mut self.data_file, "{}", json.data.to_string())?;
-                    match self.mapping_ref.lock() {
-                        Ok(mut mapping) => {
-                            mapping.map_json(&json.data, &pattern);
-                        }
-                        Err(_err) => return Err("err".into()),
-                    }
+            // Read in json object
+            let json = record.map_err(|e| CustomError::ParserRunError(e.into()))?;
+            // Write to file
+            writeln!(&mut self.data_file, "{}", json.data.to_string())
+                .map_err(|e| CustomError::ParserRunError(e.into()))?;
+            // Generate type mapping
+            match self.mapping_ref.lock() {
+                Ok(mut mapping) => {
+                    mapping.map_json(&json.data, &pattern);
                 }
-                Err(e) => {
-                    error!("Unable to convert serialsied record to json: {}", e);
-                    panic!("Unable to convert serialsied record to json: {}", e);
+                Err(_err) => {
+                    return Err(CustomError::ParserRunError(
+                        "Unable to lock mapping mutex reference".into(),
+                    ))
                 }
-            };
+            }
         }
         Ok(())
     }

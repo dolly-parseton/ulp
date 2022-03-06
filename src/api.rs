@@ -10,10 +10,17 @@ pub use store::Store;
 //
 pub type Sender<T> = Arc<Mutex<mpsc::Sender<T>>>;
 
+//
+#[derive(Debug, Clone)]
+pub enum ApiMessageType {
+    Job(String),
+    Elastic(uuid::Uuid),
+}
+
 // Functions
 pub fn routes(
     current_job: &Store<Option<Job>>,
-    message_queue: &Queue<String>,
+    message_queue: &Queue<ApiMessageType>,
 ) -> impl Filter<Extract = (impl Reply,), Error = Rejection> + Clone {
     // Job
     let job_get = warp::path!("job")
@@ -29,8 +36,13 @@ pub fn routes(
         .and(current_job.clone().into_warp())
         .and(warp::delete())
         .and_then(handlers::job::delete);
-
-    job_get.or(job_post).or(job_delete)
+    // Elastic
+    let elastic_post = warp::path!("elastic")
+        .and(message_queue.clone().into_warp())
+        .and(job_post_body())
+        .and(warp::post())
+        .and_then(handlers::job::post); // Reuse same route
+    job_get.or(job_post).or(job_delete).or(elastic_post)
 }
 
 #[derive(Debug)]
@@ -66,10 +78,13 @@ mod routes {
             }
         }
         pub async fn post(
-            queue: Queue<String>,
+            queue: Queue<ApiMessageType>,
             path: PostString,
         ) -> Result<Box<dyn Reply>, Rejection> {
-            queue.push(path.0);
+            match uuid::Uuid::parse_str(&path.0) {
+                Ok(uuid) => queue.push(ApiMessageType::Elastic(uuid)),
+                Err(_) => queue.push(ApiMessageType::Job(path.0)),
+            }
             Ok(Box::new(StatusCode::OK))
         }
         pub async fn delete(store: Store<Option<Job>>) -> Result<Box<dyn Reply>, Rejection> {
