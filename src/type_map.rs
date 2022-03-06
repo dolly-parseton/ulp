@@ -1,5 +1,6 @@
 use crate::error::CustomError;
 use std::collections::BTreeMap;
+pub use type_mapping::TypeMap;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
 pub struct IndexPatternObject {

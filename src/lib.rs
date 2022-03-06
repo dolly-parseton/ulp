@@ -21,12 +21,15 @@ use std::{
 // Consts
 const UPLOAD_DIR_ENV: &str = "UPLOAD_DIR";
 const MONGODB_ADDRESS_ENV: &str = "MONGODB_ADDRESS";
+const ELASTIC_USER_ENV: &str = "ELASTIC_USER";
 // Env Var Reads
 lazy_static! {
     static ref UPLOAD_DIR_PATH: String =
         env::var(UPLOAD_DIR_ENV).unwrap_or_else(|_| "/tmp".to_string());
     static ref MONGODB_ADDRESS: String =
         env::var(MONGODB_ADDRESS_ENV).expect("No Enviroment variable for MONGODB_ADDRESS");
+    static ref ELASTIC_USER: String =
+        env::var(ELASTIC_USER_ENV).unwrap_or_else(|_| "elastic:changeme".to_string());
 }
 
 #[derive(serde::Serialize, Debug, Clone, Eq, PartialEq, Hash)]

@@ -100,14 +100,16 @@ mod orchestrator {
                                     )
                                 }
                             };
-                        for entry in glob::glob(format!("{}/*.data", target_dir).as_str()).unwrap()
+                        for path in glob::glob(format!("{}/*.data", target_dir).as_str())
+                            .unwrap()
+                            .flatten()
                         {
-                            if let Ok(path) = entry {
-                                pool.lock().unwrap().send_message(Message::Elastic {
-                                    map: mapping.clone(),
-                                    data: path,
-                                });
-                            }
+                            // if let Ok(path) = entry {
+                            pool.lock().unwrap().send_message(Message::Elastic {
+                                map: mapping.clone(),
+                                data: path,
+                            });
+                            // }
                         }
                     }
                 }
