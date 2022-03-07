@@ -1,68 +1,134 @@
+use crate::error::CustomError;
 use std::collections::BTreeMap;
+pub use type_mapping::TypeMap;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct IndexPatternObject {
+    pub parts: Vec<(String, bool)>,
+}
+
+impl From<&str> for IndexPatternObject {
+    fn from(s: &str) -> Self {
+        let mut parts = Vec::new();
+        for (i, part) in s.split_inclusive(&['{', '}'][..]).enumerate() {
+            if part != "{" && part != "}" {
+                if i > 0 && i != s.split_inclusive(&['{', '}'][..]).count() - 1 {
+                    if s.split_inclusive(&['{', '}'][..]).collect::<Vec<&str>>()[i - 1]
+                        .ends_with('{')
+                        && s.split_inclusive(&['{', '}'][..]).collect::<Vec<&str>>()[i + 1] == "}"
+                    {
+                        parts.push((part.trim_end_matches('}').to_string(), true));
+                    } else {
+                        parts.push((part.trim_end_matches('{').to_string(), false));
+                    }
+                } else {
+                    parts.push((part.trim_end_matches('{').to_string(), false));
+                }
+            }
+        }
+        Self { parts }
+    }
+}
+
+impl IndexPatternObject {
+    pub fn generate_index_pattern(&self, data: &serde_json::Value) -> String {
+        let mut path = String::new();
+        for (key, eval) in self.parts.iter() {
+            if *eval {
+                match get_value(data, key) {
+                    None => path.push_str("NONE"),
+                    Some(v) => {
+                        use serde_json::Value::*;
+                        match v {
+                            Array(_) => path.push_str("ARRAY"),
+                            Object(_) => path.push_str("OBJECT"),
+                            _ => {
+                                if let Some(s) = v.as_str() {
+                                    path.push_str(s)
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                path.push_str(key);
+            }
+        }
+        path
+    }
+}
+
+fn get_value<'a>(value: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    fn recurse<'a>(keys: &[&str], data: &'a serde_json::Value) -> Option<&'a serde_json::Value> {
+        if let Some(key) = keys.get(0) {
+            match key.parse::<usize>() {
+                Ok(i) => {
+                    if let Some(value) = data.get(i) {
+                        return recurse(&keys[1..], value);
+                    }
+                }
+                Err(_) => {
+                    if let Some(value) = data.get(key) {
+                        return recurse(&keys[1..], value);
+                    }
+                }
+            }
+        } else {
+            return Some(data);
+        }
+        None
+    }
+    //
+    let keys = key.split('.').collect::<Vec<&str>>();
+    recurse(&keys, value)
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct Mapping {
     pub map: type_mapping::TypeMap,
-    pub target: Option<Target>,
-    pub targeted_mapping: BTreeMap<String, (type_mapping::TypeMap, Vec<type_mapping::TypeChange>)>, // Key is unique value from delimiter
+    // pub index_pattern: IndexPatternObject,
+    pub index_pattern_mappings:
+        BTreeMap<String, (type_mapping::TypeMap, Vec<type_mapping::TypeChange>)>, // Key is unique value from delimiter
     pub change_log: Vec<type_mapping::TypeChange>,
 }
 
 impl Mapping {
-    pub fn set_target(&mut self, path_parts: Vec<&str>) {
-        self.target = Some(Target {
-            parts: path_parts.into_iter().map(|s| s.to_string()).collect(),
-            delimiter: ".".to_string(),
-            unique_variations: Vec::new(),
-        });
-    }
-    pub fn map_json(&mut self, value: &serde_json::Value) {
+    pub fn map_json(&mut self, value: &serde_json::Value, index_pattern: &IndexPatternObject) {
         // Update global map
         self.map.map_json(value, &mut self.change_log);
-        // Get target field
-        if let Some(target) = self.target.as_mut() {
-            match recurse_fields(&value, &target.parts, 0) {
-                Some(key) => {
-                    let key_s = key.to_string();
-                    // Might want to compare performance on push + dedup
-                    if !target.unique_variations.contains(&key_s) {
-                        target.unique_variations.push(key_s.clone());
+        // Index pattern
+        let pattern = index_pattern.generate_index_pattern(value);
+        let (map, changes) = self
+            .index_pattern_mappings
+            .entry(pattern)
+            .or_insert((type_mapping::TypeMap::return_type(value), Vec::new()));
+        map.map_json(value, changes);
+    }
+    pub fn cast_json(
+        &self,
+        value: &mut serde_json::Value,
+        index_pattern: Option<&str>,
+    ) -> Result<(), CustomError> {
+        match index_pattern {
+            None => type_casting::cast_to_type_map(value, &self.map)?,
+            Some(pattern) => {
+                let (map, _) = match self.index_pattern_mappings.get(pattern) {
+                    Some(m) => m,
+                    None => {
+                        return Err(CustomError::TypeCastError(
+                            format!(
+                            "Attempted to read index_pattern_mappings with key: {}. Does not exist",
+                            pattern
+                        )
+                            .into(),
+                        ))
                     }
-                    let (map, changes) = self
-                        .targeted_mapping
-                        .entry(key_s)
-                        .or_insert((type_mapping::TypeMap::return_type(value), Vec::new()));
-                    map.map_json(value, changes);
-                }
-                None => (),
+                };
+                type_casting::cast_to_type_map(value, map)?
             }
         }
-
-        //
-        fn recurse_fields(
-            value: &serde_json::Value,
-            target: &Vec<String>,
-            target_index: usize,
-        ) -> Option<serde_json::Value> {
-            if target_index == target.len() {
-                return Some(value.clone());
-            }
-            if let Some(value) = value.get(&target[target_index]) {
-                return recurse_fields(value, target, target_index + 1);
-            }
-            None
-        }
+        Ok(())
     }
-    pub fn cast_json(&self, value: &mut serde_json::Value) {
-        type_casting::cast_to_type_map(value, &self.map);
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct Target {
-    pub parts: Vec<String>,
-    pub delimiter: String,
-    pub unique_variations: Vec<String>,
 }
 
 mod type_mapping {
@@ -71,14 +137,14 @@ mod type_mapping {
         collections::BTreeMap,
         net::{Ipv4Addr, Ipv6Addr},
     };
-    #[derive(Debug, Clone)]
+    #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
     pub struct TypeChange {
         pub path: String,
         pub value: JsonValue,
         pub old_type: TypeMap,
         pub new_type: TypeMap,
     }
-    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    #[derive(serde::Serialize, serde::Deserialize, Clone, Debug, PartialEq, Eq, Hash)]
     pub enum TypeMap {
         Null,
         Boolean,
@@ -112,18 +178,29 @@ mod type_mapping {
             match (left, right) {
                 // left Boolean
                 (TypeMap::Boolean, TypeMap::Null) => TypeMap::Boolean,
+                (TypeMap::Boolean, r) => r.clone(),
+                // (TypeMap::Boolean, TypeMap::UnsignedInteger) => TypeMap::UnsignedInteger, // Catch values where 0 or 1 moving to number
+                // (TypeMap::Boolean, TypeMap::SignedInteger) => TypeMap::SignedInteger, // Catch values where 0 or 1 moving to number
+                // (TypeMap::Boolean, TypeMap::String) => TypeMap::String, // Catch values where boolean and string
+                // (TypeMap::Boolean, TypeMap::IPv4) => TypeMap::String, // Catch values where boolean and string
+                // (TypeMap::Boolean, TypeMap::IPv6) => TypeMap::String, // Catch values where boolean and string
                 // left UnsignedInteger
                 (TypeMap::UnsignedInteger, TypeMap::Null) => TypeMap::UnsignedInteger,
                 (TypeMap::UnsignedInteger, TypeMap::Boolean) => TypeMap::UnsignedInteger, // Cast to bool to unsigned int
+                (TypeMap::UnsignedInteger, r) => r.clone(),
+                // (TypeMap::UnsignedInteger, TypeMap::String) => TypeMap::String, // !! This is to catch fields with hex and strings causing dominant type panic
                 // left SignedInteger
                 (TypeMap::SignedInteger, TypeMap::Null) => TypeMap::SignedInteger,
                 (TypeMap::SignedInteger, TypeMap::Boolean) => TypeMap::SignedInteger,
                 (TypeMap::SignedInteger, TypeMap::UnsignedInteger) => TypeMap::SignedInteger, // Cast unsigned int to signed int
+                (TypeMap::SignedInteger, r) => r.clone(),
+                // (TypeMap::SignedInteger, TypeMap::String) => TypeMap::String, // !! This is to catch fields with hex and strings causing dominant type panic
                 // left Double
                 (TypeMap::Double, TypeMap::Null) => TypeMap::Double,
                 (TypeMap::Double, TypeMap::Boolean) => TypeMap::Double,
                 (TypeMap::Double, TypeMap::UnsignedInteger) => TypeMap::Double, // Cast unsigned int to signed int
                 (TypeMap::Double, TypeMap::SignedInteger) => TypeMap::Double, // Cast signed int to float
+                (TypeMap::Double, r) => r.clone(),
                 // left IPv4 - Start of impossible conditions
                 (TypeMap::IPv4, TypeMap::Null) => TypeMap::IPv4,
                 // Defaulting to string for complex types
@@ -131,6 +208,7 @@ mod type_mapping {
                 (TypeMap::IPv4, TypeMap::UnsignedInteger) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv4, TypeMap::SignedInteger) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv4, TypeMap::Double) => TypeMap::String, // Casting could maybe be attempted here in practice
+                (TypeMap::IPv4, r) => r.clone(),
                 // left IPv6
                 (TypeMap::IPv6, TypeMap::Null) => TypeMap::IPv6,
                 // Defaulting to string for complex types
@@ -139,6 +217,7 @@ mod type_mapping {
                 (TypeMap::IPv6, TypeMap::SignedInteger) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv6, TypeMap::Double) => TypeMap::String, // Casting could maybe be attempted here in practice
                 (TypeMap::IPv6, TypeMap::IPv4) => TypeMap::String, // Casting could maybe be attempted here in practice
+                (TypeMap::IPv6, r) => r.clone(),
                 // left Date
                 (TypeMap::Date, TypeMap::Null) => TypeMap::Date,
                 // Defaulting to string for complex types
@@ -157,6 +236,12 @@ mod type_mapping {
                 (TypeMap::String, TypeMap::IPv4) => TypeMap::String,
                 (TypeMap::String, TypeMap::IPv6) => TypeMap::String,
                 (TypeMap::String, TypeMap::Date) => TypeMap::String,
+                (TypeMap::String, TypeMap::Array(_)) | (TypeMap::Array(_), TypeMap::String) => {
+                    TypeMap::String
+                }
+                (TypeMap::String, TypeMap::Object(_)) | (TypeMap::Object(_), TypeMap::String) => {
+                    TypeMap::String
+                }
                 // left Array
                 (TypeMap::Array(left_array), TypeMap::Null) => TypeMap::Array(left_array.clone()),
                 (TypeMap::Array(left_array), TypeMap::Array(right_array)) => {
@@ -190,10 +275,10 @@ mod type_mapping {
                     }
                     TypeMap::Object(dominant_object)
                 }
-                (TypeMap::Object(left_object), _) => unimplemented!(),
+                (TypeMap::Object(_left_object), _) => unimplemented!(),
                 // Complex type cases
-                (TypeMap::IPv4, TypeMap::String) => TypeMap::String,
-                (TypeMap::IPv6, TypeMap::String) => TypeMap::String,
+                // (TypeMap::IPv4, TypeMap::String) => TypeMap::String,
+                // (TypeMap::IPv6, TypeMap::String) => TypeMap::String,
                 (TypeMap::Date, TypeMap::String) => TypeMap::String,
                 // Null cases
                 // left Null
@@ -204,7 +289,7 @@ mod type_mapping {
                     if l == r {
                         return l.clone();
                     }
-                    println!("{:?}", (l, r));
+                    error!("Unimplemented type clash: {:?}", (l, r));
                     unimplemented!()
                 }
             }
@@ -220,10 +305,16 @@ mod type_mapping {
             }
         }
         pub fn map_number(value: &serde_json::Number) -> Self {
-            if value.is_u64() {
-                Self::UnsignedInteger
-            } else if value.is_i64() {
-                Self::SignedInteger
+            if let Some(v) = value.as_u64() {
+                match v {
+                    0 | 1 => Self::Boolean,
+                    _ => Self::UnsignedInteger,
+                }
+            } else if let Some(v) = value.as_i64() {
+                match v {
+                    0 | 1 => Self::Boolean,
+                    _ => Self::SignedInteger,
+                }
             } else {
                 Self::Double
             }
@@ -232,6 +323,11 @@ mod type_mapping {
             if value.to_ascii_lowercase() == "true" || value.to_ascii_lowercase() == "false" {
                 Self::Boolean
             // Push DTA code here, link the library for parsing variable types from a dictionary
+            } else if let Some(hex) = value.to_ascii_lowercase().strip_prefix("0x") {
+                match u64::from_str_radix(hex, 16).is_ok() {
+                    true => Self::UnsignedInteger,
+                    false => Self::String,
+                }
             } else if chrono::DateTime::parse_from_rfc3339(value).is_ok()
                 || chrono::DateTime::parse_from_rfc2822(value).is_ok()
                 || chrono::DateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S%.6fZ").is_ok()
@@ -254,7 +350,7 @@ mod type_mapping {
                 map: &mut TypeMap,
                 changes: &mut Vec<TypeChange>,
             ) {
-                let mut p = match path {
+                let p = match path {
                     Some(p) => p,
                     None => "".to_string(),
                 };
@@ -262,7 +358,9 @@ mod type_mapping {
                     // Handle recursion on object collisions
                     (&JsonValue::Object(ref jm), TypeMap::Object(ref mut tm)) => {
                         for (jk, jv) in jm.iter() {
-                            let entry = tm.entry(jk.clone()).or_insert(TypeMap::return_type(jv));
+                            let entry = tm
+                                .entry(jk.clone())
+                                .or_insert_with(|| TypeMap::return_type(jv));
                             recurse(Some(format!("{}.{}", p, jk)), jv, entry, changes);
                         }
                     }
@@ -270,19 +368,19 @@ mod type_mapping {
                     // - TODO determine how to handle arrays with mutliple types (left to right dominance check on change or in post?)
                     (&JsonValue::Array(ref jm), TypeMap::Array(ref mut tm)) => {
                         for (ji, jv) in jm.iter().enumerate() {
-                            let entry = tm.entry(ji).or_insert(TypeMap::return_type(jv));
+                            let entry = tm.entry(ji).or_insert_with(|| TypeMap::return_type(jv));
                             recurse(Some(format!("{}.{}", p, ji)), jv, entry, changes);
                         }
                     }
                     (v, t) => {
                         let left = TypeMap::return_type(v);
-                        // println!("Change {:?}", (&v, &t));
+                        debug!("Change {:?}", (&v, &t));
                         let new_right = TypeMap::get_dominant_type(&left, t);
                         if &left != t && left != TypeMap::Null && &new_right != t {
-                            println!("Prev {:?}", (&v, &t));
-                            println!("Change {:?} to {:?}", &t, &new_right);
+                            debug!("Prev {:?}", (&v, &t));
+                            debug!("Change {:?} to {:?}", &t, &new_right);
                             changes.push(TypeChange {
-                                path: p.strip_prefix(".").unwrap().to_string(), // This unwrap will always succeed
+                                path: p.strip_prefix('.').unwrap().to_string(), // This unwrap will always succeed
                                 old_type: t.clone(),
                                 new_type: new_right.clone(),
                                 value: v.clone(),
@@ -298,39 +396,63 @@ mod type_mapping {
 
 mod type_casting {
     use super::type_mapping::TypeMap;
+    use crate::error::CustomError;
     use serde_json::Value as JsonValue;
-    use std::{
-        collections::BTreeMap,
-        net::{Ipv4Addr, Ipv6Addr},
-    };
-    pub fn cast_to_type_map(value: &mut JsonValue, type_map: &TypeMap) {
+    pub fn cast_to_type_map(value: &mut JsonValue, type_map: &TypeMap) -> Result<(), CustomError> {
         // Eq
         match (value, type_map) {
-            (JsonValue::Null, TypeMap::Null) => (),
-            (JsonValue::Bool(_), TypeMap::Boolean) => (),
-            (JsonValue::Number(_), TypeMap::UnsignedInteger) => (),
-            (JsonValue::Number(_), TypeMap::SignedInteger) => (),
-            (JsonValue::Number(_), TypeMap::Double) => (),
-            (JsonValue::String(_), TypeMap::String) => (),
-            (JsonValue::String(_), TypeMap::Date) => (),
-            (JsonValue::String(_), TypeMap::IPv4) => (),
-            (JsonValue::String(_), TypeMap::IPv6) => (),
+            (JsonValue::Null, TypeMap::Null) => Ok(()),
+            (JsonValue::Bool(_), TypeMap::Boolean) => Ok(()),
+            (JsonValue::Number(_), TypeMap::UnsignedInteger) => Ok(()),
+            (JsonValue::Number(_), TypeMap::SignedInteger) => Ok(()),
+            (JsonValue::Number(_), TypeMap::Double) => Ok(()),
+            (JsonValue::String(_), TypeMap::String) => Ok(()),
+            (JsonValue::String(_), TypeMap::Date) => Ok(()),
+            (JsonValue::String(_), TypeMap::IPv4) => Ok(()),
+            (JsonValue::String(_), TypeMap::IPv6) => Ok(()),
             // Not Eq
-            (v, t) => match (v, t) {
-                (JsonValue::Array(array), TypeMap::Array(ref tm)) => {
-                    for (i, v) in array.iter_mut().enumerate() {
-                        let entry = tm.get(&i).unwrap();
-                        cast_to_type_map(v, entry);
+            (v, t) => {
+                match (v, t) {
+                    (JsonValue::Array(array), TypeMap::Array(ref tm)) => {
+                        for (i, v) in array.iter_mut().enumerate() {
+                            match tm.get(&i) {
+                                Some(entry) => cast_to_type_map(v, entry)?,
+                                None => return Err(CustomError::TypeCastError("Attempted to cast a field value to a type no mapping exists for.".into())),
+                            }
+                        }
+                        Ok(())
                     }
-                }
-                (JsonValue::Object(object), TypeMap::Object(ref tm)) => {
-                    for (k, v) in object.iter_mut() {
-                        let entry = tm.get(k).unwrap();
-                        cast_to_type_map(v, entry);
+                    (JsonValue::Object(object), TypeMap::Object(ref tm)) => {
+                        for (k, v) in object.iter_mut() {
+                            match  tm.get(k) {
+                                Some(entry) => cast_to_type_map(v, entry)?,
+                                None => return Err(CustomError::TypeCastError("Attempted to cast a field value to a type no mapping exists for.".into())),
+                            }
+                        }
+                        Ok(())
                     }
+                    _ => Ok(()),
                 }
-                _ => (),
-            },
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+    #[test]
+    fn index_pattern_test() {
+        let pattern = super::IndexPatternObject::from("{{x.y}}_aaa_{{a.b}}_bbb");
+        println!("{:?}", pattern);
+        let data = json!({
+            "x": {
+                "y": "apple"
+            },
+            "a": {
+                "b": "pear"
+            }
+        });
+        assert_eq!(pattern.generate_index_pattern(&data), "apple_aaa_pear_bbb");
     }
 }
