@@ -58,7 +58,7 @@ impl Parser {
             // Parse entry
             let json =
                 serde_json::to_value(entry).map_err(|e| CustomError::ParserRunError(e.into()))?;
-            writeln!(&mut self.data_file, "{}", json.to_string())
+            writeln!(&mut self.data_file, "{}", json)
                 .map_err(|e| CustomError::ParserRunError(e.into()))?;
             // Generate type map
             match self.mapping_ref.lock() {

@@ -1,19 +1,19 @@
 version: "3.9"
 services:
-  # ulp:
-  #   build: .
-  #   ports:
-  #     - "3030:3030"
-  #   volumes:
-  #     - /home/hts/Git/ulp/.test_data:/data/:ro
-  # Elastic + Kibana
+  ulp:
+    build: .
+    ports:
+      - "3030:3030"
+    # volumes:
+    #   - /home/hts/Git/ulp/.test_data:/data/:ro
+    # Elastic + Kibana
   elasticsearch:
     build:
       context: docker-elk/elasticsearch/
       args:
         ELK_VERSION: 7.16.0
     volumes:
-      - ./docker-elk/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro,z 
+      - ./docker-elk/elasticsearch/config/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro,z
       - ./docker-elk/elasticsearch:/usr/share/elasticsearch/data:z
     ports:
       - "9200:9200"
@@ -39,7 +39,7 @@ services:
       - elk
     depends_on:
       - elasticsearch
-  # 
+  #
 networks:
   elk:
     driver: bridge

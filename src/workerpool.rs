@@ -7,7 +7,6 @@ mod orchestrator {
     use crate::{
         api::{ApiMessageType, Store},
         job::Job,
-        type_map::Mapping,
     };
 
     use std::{
@@ -83,10 +82,11 @@ mod orchestrator {
                         info!("Elastic ingestion Job issued for uuid: {}", &uuid);
                         // Read mapping into memory
                         let target_dir = format!("{}/{}", crate::UPLOAD_DIR_ENV, uuid);
-                        let mapping: Mapping =
+                        // Serialize job
+                        let job: Job =
                             match fs::read_to_string(format!("{}/{}", target_dir, "mappings.json"))
                             {
-                                Ok(m) => serde_json::from_str(&m).unwrap(),
+                                Ok(j) => serde_json::from_str(&j).unwrap(),
                                 Err(e) => {
                                     error!(
                                         "Failed to read mapping file at {}. {} ",
@@ -94,22 +94,26 @@ mod orchestrator {
                                         e
                                     );
                                     panic!(
-                                        "Failed to read mapping file at {}. {}",
-                                        format!("{}/{}", target_dir, "mappings.json"),
-                                        e
+                                        "Failed to read mapping file at {}/mappings.json. {}",
+                                        target_dir, e
                                     )
                                 }
                             };
-                        for path in glob::glob(format!("{}/*.data", target_dir).as_str())
-                            .unwrap()
-                            .flatten()
-                        {
-                            // if let Ok(path) = entry {
+                        let mapping = job.mapping.lock().unwrap();
+                        // For each index mapping issue the elastic mapping
+                        for (index, (map, _)) in &mapping.index_pattern_mappings {
+                            pool.lock().unwrap().send_message(Message::ElasticMapping {
+                                index: index.to_string(),
+                                map: map.clone(),
+                            });
+                        }
+                        // For each parsed file issue a Message Job to thread
+                        for parsed_file in &mapping.file_mapping {
                             pool.lock().unwrap().send_message(Message::Elastic {
                                 map: mapping.clone(),
-                                data: path,
+                                data: parsed_file.parsed_file_path.clone(),
+                                parser: parsed_file.parser_used.clone(),
                             });
-                            // }
                         }
                     }
                 }
@@ -158,9 +162,12 @@ mod orchestrator {
                         let mut working_job = processing_queue.take();
                         // Is len of Sent == len of Processed?
                         // Is message id in working_job.sent
-                        let does_contain = working_job.sent.lock().unwrap().contains(&task.id);
+                        let does_contain = working_job
+                            .sent
+                            .lock()
+                            .unwrap()
+                            .contains(&(task.id, task.path.clone()));
                         if does_contain {
-                            // println!("{:#?}", &task);
                             info!("Confirmed task {} has finished processing", &task.id);
                             info!("{} tasks waiting", pool.lock().unwrap().queue.lock().len());
                             working_job.processed.push(task);
@@ -182,30 +189,7 @@ mod orchestrator {
             // Loop on status of workers, eventually to be replaced with optional CLI GUI for non-docker runs
             info!("Entering main Orchestrator loop");
             loop {
-                // Waiting on #![feature(thread_is_running)]
-                // if !api_message_handle.is_running() {
-                //     error!("Orchestrator API message thread has stopped");
-                //     panic!("Orchestrator API message thread has stopped");
-                // }
-                // if !job_task_handle.is_running() {
-                //     error!("Orchestrator Job to Task thread has stopped");
-                //     panic!("Orchestrator Job to Task thread has stopped");
-                // }
-                // if !task_recv_handle.is_running() {
-                //     error!("Orchestrator Task receiver thread has stopped");
-                //     panic!("Orchestrator Task receiver thread has stopped");
-                // }
-                //
-
-                // std::thread::sleep(std::time::Duration::from_secs(10));
-                debug!(
-                    "{:#?}",
-                    self.pool.lock().expect("Could not lock pool").status_map()
-                );
                 let completed = self.completed_queue.take();
-                // println!("{:#?}", completed);
-                // std::process::exit(1);
-                let mapping = completed.mapping.lock().unwrap();
                 std::fs::create_dir_all(format!("{}/{}/", crate::UPLOAD_DIR_ENV, completed.id))
                     .unwrap();
                 let mut mapping_file = fs::OpenOptions::new()
@@ -220,17 +204,16 @@ mod orchestrator {
                     ))
                     .unwrap();
                 use std::io::Write;
-                // println!("{:#?}", mapping);
                 write!(
                     &mut mapping_file,
                     "{}",
-                    serde_json::to_string(&*mapping).unwrap().to_string()
+                    serde_json::to_string(&completed).unwrap()
                 )
                 .unwrap();
                 info!(
                     "Completed Job {} in: {:?}\n\tFiles: {}",
                     completed.id,
-                    completed.started.elapsed(),
+                    completed.completed.elapsed(),
                     completed.paths.len()
                 );
             }
@@ -302,18 +285,32 @@ mod pool {
                             // Log details and start
                             trace!("Processing task ({:?}): {:?}", id, &task);
                             // Do the task / process the file
-                            if let Ok(parser) = Parser::try_from(&task.path) {
-                                parser.run_parser(&task);
+                            match Parser::try_from(&task.path) {
+                                Ok(parser) => {
+                                    parser.run_parser(&task);
+                                    // Add parsed stats to mapping
+                                    if let Err(e) = task.add_parsed_file_stats(parser.clone()) {
+                                        error!("{}", e);
+                                    }
+                                    // Done!
+                                    trace!("Finished task ({:?}): {:?}", id, &task);
+                                }
+                                Err(_e) => unimplemented!(),
                             }
+                            if let Ok(_parser) = Parser::try_from(&task.path) {}
                             trace!("Finished task ({:?}): {:?}", id, &task);
                             // Log finished details / send output
                             let _ = output.send(Task(task)).unwrap_or_else(|_| {
                                 panic!("Worker {} failed to send results to orchestrator", id)
                             });
                         }
-                        Elastic { map, data } => {
+                        Elastic { map, data, parser } => {
                             //
-                            crate::elastic::normalise_then_send(map, data).unwrap();
+                            crate::elastic::normalise_then_send(map, data, &parser).unwrap();
+                        }
+                        ElasticMapping { map, index } => {
+                            //
+                            crate::elastic::send_mapping(index, map).unwrap();
                         }
                         Debug(_) => {
                             debug!("Processing task ({:?}): {:?}", id, &task_wrapper);
@@ -330,14 +327,25 @@ mod pool {
     }
 
     pub mod message {
-        use crate::{job::Task, type_map::Mapping};
+        use crate::{
+            job::Task,
+            type_map::{Mapping, TypeMap},
+        };
         use std::path::PathBuf;
         //
         #[derive(Clone, Debug)]
         pub enum Message {
             Debug(i64),
             Task(Task),
-            Elastic { map: Mapping, data: PathBuf },
+            Elastic {
+                map: Mapping,
+                data: PathBuf,
+                parser: crate::Parser,
+            },
+            ElasticMapping {
+                map: TypeMap,
+                index: String,
+            },
         }
 
         impl From<i64> for Message {
@@ -479,12 +487,7 @@ mod queue {
                     index = Some(i);
                 }
             }
-            let val;
-            if let Some(i) = index {
-                val = Some(queue.remove(i));
-            } else {
-                val = None;
-            }
+            let val = index.map(|i| queue.remove(i));
             *block = ();
             val
         }

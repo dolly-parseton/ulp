@@ -1,25 +1,51 @@
 use crate::{error::CustomError, type_map::Mapping};
 use glob::glob;
+use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::Instant, // {io, io::prelude::*},
 };
 use uuid::Uuid;
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Job {
     pub id: Uuid,
     pub paths: Vec<PathBuf>,
-    pub processed: Vec<Task>,
     pub status: Status,
-    #[serde(skip)]
-    pub started: Instant,
-    #[serde(skip)]
     pub mapping: Arc<Mutex<Mapping>>,
+    pub sent: Arc<Mutex<Vec<(Uuid, PathBuf)>>>,
     #[serde(skip)]
-    pub sent: Arc<Mutex<Vec<Uuid>>>,
+    pub processed: Vec<Task>,
+    #[serde(with = "approx_instant")]
+    pub completed: Instant,
+}
+
+mod approx_instant {
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::{Instant, SystemTime};
+
+    pub fn serialize<S>(instant: &Instant, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let system_now = SystemTime::now();
+        let instant_now = Instant::now();
+        let approx = system_now - (instant_now - *instant);
+        approx.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Instant, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let de = SystemTime::deserialize(deserializer)?;
+        let system_now = SystemTime::now();
+        let instant_now = Instant::now();
+        let duration = system_now.duration_since(de).map_err(Error::custom)?;
+        let approx = instant_now - duration;
+        Ok(approx)
+    }
 }
 
 impl Job {
@@ -40,7 +66,7 @@ impl Job {
                 sent: Arc::new(Mutex::new(Vec::new())),
                 processed: Vec::new(),
                 status: Status::default(),
-                started: Instant::now(),
+                completed: Instant::now(),
                 mapping: Arc::new(Mutex::new(Mapping::default())),
             }),
         }
@@ -57,6 +83,14 @@ pub struct Task {
     pub mapping_ref: Arc<Mutex<Mapping>>,
 }
 
+impl Task {
+    pub fn add_parsed_file_stats(&self, parser: crate::Parser) -> Result<(), CustomError> {
+        let mut mapping = self.mapping_ref.lock().unwrap();
+        mapping.add_parsed_file(self.job_id, self.id, &self.path, parser)?;
+        Ok(())
+    }
+}
+
 impl Iterator for Job {
     type Item = Result<Task, CustomError>;
     fn next(&mut self) -> Option<Self::Item> {
@@ -66,7 +100,7 @@ impl Iterator for Job {
                 let task_id = Uuid::new_v4();
                 match self.sent.lock() {
                     Ok(mut sent) => {
-                        sent.push(task_id);
+                        sent.push((task_id, path.clone()));
                     }
                     Err(e) => {
                         return Some(Err(CustomError::ParserRunError(
@@ -86,7 +120,7 @@ impl Iterator for Job {
     }
 }
 
-#[derive(serde::Serialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Status {
     Pending,
     Done,
@@ -97,71 +131,3 @@ impl Default for Status {
         Self::Pending
     }
 }
-
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct Stats {
-    pub scope: String,
-    pub total_entries: usize,
-    pub total_index_patterns: usize,
-    pub index_pattern_counts: HashMap<String, usize>,
-}
-
-// pub struct Data {
-//     pub inner: serde_json::Value,
-// }
-
-// impl Data {
-//     pub fn generate_index_pattern(&self, index_pattern: &IndexPatternObject) -> String {
-//         let mut path = String::new();
-//         for (key, eval) in index_pattern.parts.iter() {
-//             if *eval {
-//                 match self.get_value(key) {
-//                     None => path.push_str("NONE"),
-//                     Some(v) => {
-//                         use serde_json::Value::*;
-//                         match v {
-//                             Array(_) => path.push_str("ARRAY"),
-//                             Object(_) => path.push_str("OBJECT"),
-//                             _ => {
-//                                 if let Some(s) = v.as_str() {
-//                                     path.push_str(s)
-//                                 }
-//                             }
-//                         }
-//                     }
-//                 }
-//             } else {
-//                 path.push_str(key);
-//             }
-//         }
-//         path
-//     }
-
-//     fn get_value(&self, key: &str) -> Option<&serde_json::Value> {
-//         fn recurse<'a>(
-//             keys: &[&str],
-//             data: &'a serde_json::Value,
-//         ) -> Option<&'a serde_json::Value> {
-//             if let Some(key) = keys.get(0) {
-//                 match key.parse::<usize>() {
-//                     Ok(i) => {
-//                         if let Some(value) = data.get(i) {
-//                             return recurse(&keys[1..], value);
-//                         }
-//                     }
-//                     Err(_) => {
-//                         if let Some(value) = data.get(key) {
-//                             return recurse(&keys[1..], value);
-//                         }
-//                     }
-//                 }
-//             } else {
-//                 return Some(data);
-//             }
-//             None
-//         }
-//         //
-//         let keys = key.split('.').collect::<Vec<&str>>();
-//         recurse(&keys, &self.inner)
-//     }
-// }

@@ -12,6 +12,7 @@ pub enum CustomError {
         job_id: uuid::Uuid,
         path: PathBuf,
     },
+    StatGenerationError(Box<dyn error::Error>),
 }
 impl std::error::Error for CustomError {}
 
@@ -37,6 +38,13 @@ impl fmt::Display for CustomError {
             }
             CustomError::TypeMapError(e) => {
                 write!(f, "TypeMapError (Failed to map Json object): {}", e)
+            }
+            CustomError::StatGenerationError(e) => {
+                write!(
+                    f,
+                    "StatGenerationError (Failed to generate stats for parsed file): {}",
+                    e
+                )
             }
             CustomError::TypeCastError(e) => {
                 write!(

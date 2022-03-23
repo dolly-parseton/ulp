@@ -1,5 +1,9 @@
 use crate::error::CustomError;
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    path::{Path, PathBuf},
+};
 pub use type_mapping::TypeMap;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
@@ -89,10 +93,67 @@ pub struct Mapping {
     // pub index_pattern: IndexPatternObject,
     pub index_pattern_mappings:
         BTreeMap<String, (type_mapping::TypeMap, Vec<type_mapping::TypeChange>)>, // Key is unique value from delimiter
+    //
+    pub file_mapping: Vec<ParsedFileStats>,
     pub change_log: Vec<type_mapping::TypeChange>,
 }
 
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
+pub struct ParsedFileStats {
+    pub parsed_file_uuid: uuid::Uuid,
+    pub source_file_path: PathBuf,
+    pub parsed_file_path: PathBuf,
+    pub file_size: u64,
+    pub file_hash: String,
+    pub parser_used: crate::Parser,
+}
+
 impl Mapping {
+    pub fn add_parsed_file<P: AsRef<Path> + Into<PathBuf>>(
+        &mut self,
+        job_uuid: uuid::Uuid,
+        uuid: uuid::Uuid,
+        path: P,
+        parser_used: crate::Parser,
+    ) -> Result<(), CustomError> {
+        use sha2::Digest;
+        let mut hash_digest = sha2::Sha256::new();
+        let mut file_handle = fs::File::open(&path).map_err(|e| {
+            CustomError::StatGenerationError(format!("Failed to grab file handle: {}", e).into())
+        })?;
+        io::copy(&mut file_handle, &mut hash_digest).map_err(|e| {
+            CustomError::StatGenerationError(format!("Failed to copy data to digest: {}", e).into())
+        })?;
+        let file_hash = format!("{:x}", hash_digest.finalize());
+        let file_size = file_handle
+            .metadata()
+            .map_err(|e| {
+                CustomError::StatGenerationError(
+                    format!("Failed to read file metadata: {}", e).into(),
+                )
+            })?
+            .len();
+        self.file_mapping.push(ParsedFileStats {
+            parsed_file_uuid: uuid,
+            source_file_path: path.into(),
+            // Generate path
+            parsed_file_path: fs::canonicalize(format!(
+                "{}/{}/{}.data",
+                crate::UPLOAD_DIR_ENV,
+                job_uuid,
+                uuid
+            ))
+            .map_err(|e| {
+                CustomError::StatGenerationError(
+                    format!("Failed to canonicalize data file path: {}", e).into(),
+                )
+            })?,
+            file_size,
+            file_hash,
+            parser_used,
+        });
+        Ok(())
+    }
     pub fn map_json(&mut self, value: &serde_json::Value, index_pattern: &IndexPatternObject) {
         // Update global map
         self.map.map_json(value, &mut self.change_log);
