@@ -101,7 +101,7 @@ mod orchestrator {
                             };
                         let mapping = job.mapping.lock().unwrap();
                         // For each index mapping issue the elastic mapping
-                        for (index, (map, _)) in &mapping.index_pattern_mappings {
+                        for (index, map) in &mapping.index_pattern_mappings {
                             pool.lock().unwrap().send_message(Message::ElasticMapping {
                                 index: index.to_string(),
                                 map: map.clone(),
@@ -109,11 +109,20 @@ mod orchestrator {
                         }
                         // For each parsed file issue a Message Job to thread
                         for parsed_file in &mapping.file_mapping {
+                            // Track elapsed and submit on 1/2 second intervals
+                            use std::time::{Duration, Instant};
+                            let start = Instant::now();
+                            //
                             pool.lock().unwrap().send_message(Message::Elastic {
                                 map: mapping.clone(),
                                 data: parsed_file.parsed_file_path.clone(),
                                 parser: parsed_file.parser_used.clone(),
                             });
+                            //
+                            let duration = start.elapsed();
+                            if duration < Duration::from_millis(5) {
+                                std::thread::sleep(Duration::from_millis(5) - duration);
+                            }
                         }
                     }
                 }
@@ -327,11 +336,9 @@ mod pool {
     }
 
     pub mod message {
-        use crate::{
-            job::Task,
-            type_map::{Mapping, TypeMap},
-        };
+        use crate::{job::Task, type_map::Mapping};
         use std::path::PathBuf;
+        use type_casting::Types as TypeMap;
         //
         #[derive(Clone, Debug)]
         pub enum Message {

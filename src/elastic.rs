@@ -1,25 +1,24 @@
-use crate::{
-    error::CustomError,
-    type_map::{IndexPatternObject, Mapping, TypeMap},
-};
+use crate::error::CustomError;
+use crate::type_map::{IndexPatternObject, Mapping};
 use std::{
     collections::BTreeMap,
     fs::File,
     io::{self, BufRead},
     path::{Path, PathBuf},
 };
+use type_casting::Types as TypeMap;
 
 pub fn send_mapping(index: String, data: TypeMap) -> Result<(), CustomError> {
     let client = reqwest::blocking::Client::new();
     // loop {
     let res = client
-        .post(format!(
+        .put(format!(
             "http://0.0.0.0:9200/{}",
             sanitise_string_elastic(&index)
         ))
         .basic_auth("elastic", Some("changeme"))
         .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
-        .body(mapping::as_elastic_map(&data))
+        .body(as_elastic_map(&data))
         .send()
         .map_err(|e| CustomError::ElasticError(e.into()))?;
     match res.status() {
@@ -34,6 +33,36 @@ pub fn send_mapping(index: String, data: TypeMap) -> Result<(), CustomError> {
     }
     // }
     Ok(())
+}
+//
+fn as_elastic_map(map: &TypeMap) -> String {
+    return format!("{{\"mappings\":{}}}", recurse(map));
+    fn recurse(t: &TypeMap) -> String {
+        use TypeMap::*;
+        match t {
+            Null => String::from("{\"type\": \"keyword\",\"null_value\": \"NULL\"}"),
+            Bool => String::from("{\"type\": \"boolean\"}"),
+            // UnsignedInteger => String::from("{\"type\": \"unsigned_long\"}"),
+            Int => String::from("{\"type\": \"long\"}"),
+            Float => String::from("{\"type\": \"double\"}"),
+            IPv4 => String::from("{\"type\": \"ip\"}"),
+            IPv6 => String::from("{\"type\": \"ip\"}"),
+            Date => String::from("{\"type\": \"date\", \"format\": \"yyyy-MM-dd HH:mm:ss||yyyy-MM-dd||epoch_millis||date_optional_time||basic_ordinal_date_time\"}"),
+            Str => String::from("{\"type\": \"text\", \"fields\": {\"keyword\": {\"type\": \"keyword\", \"ignore_above\": 256}}}"),
+            List(_) => {
+                String::from("{\"type\": \"text\", \"fields\": {\"keyword\": {\"type\": \"keyword\", \"ignore_above\": 256}}}")
+            },
+            Object(ref m) => {
+                let mut parts: Vec<String> = Vec::new();
+                for (k, v) in m {
+                    parts.push(format!("\"{}\": {} ", k, recurse(v)));
+                    // map.insert(k.to_string(), String::new(format!("{{\"properties\":{}}}", recurse(v.clone()))));
+                }
+                // let string = parts.join(",");
+                format!("{{\"properties\": {{{}}}}}", parts.join(","))
+            },
+        }
+    }
 }
 
 pub fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
@@ -52,15 +81,19 @@ pub fn normalise_then_send(
     let mut buffer = Vec::with_capacity(1000);
     let index_pattern: IndexPatternObject = parser.default_index_pattern().into();
     for line in read_lines(data).map_err(|e| CustomError::ElasticError(e.into()))? {
-        let mut json =
-            serde_json::from_str(&line.map_err(|e| CustomError::ElasticError(e.into()))?)
-                .map_err(|e| CustomError::ElasticError(e.into()))?;
+        let json = serde_json::from_str(&line.map_err(|e| CustomError::ElasticError(e.into()))?)
+            .map_err(|e| CustomError::ElasticError(e.into()))?;
         let data_pattern = index_pattern.generate_index_pattern(&json);
-        map.cast_json(&mut json, None)?;
+        let json = map.cast_json(json, Some(&data_pattern))?;
         buffer.push((data_pattern, json));
         if buffer.len() == buffer.capacity() {
+            println!("{:?}", std::mem::size_of_val(&*buffer));
             bulk_api(&mut buffer).map_err(|e| CustomError::ElasticError(e))?;
         }
+    }
+    if !buffer.is_empty() {
+        println!("{:?}", std::mem::size_of_val(&*buffer));
+        bulk_api(&mut buffer).map_err(|e| CustomError::ElasticError(e))?;
     }
     Ok(())
 }
@@ -74,7 +107,7 @@ pub fn bulk_api(
         // Bulk API + Elastic Drain
         let uuid = uuid::Uuid::new_v4();
         let index_obj = format!(
-            "{{\"index\" : {{ \"_index\" : \"{}\", \"_id\" : \"{}\",}} }}",
+            "{{\"index\" : {{ \"_index\" : \"{}\", \"_id\" : \"{}\"}} }}",
             sanitise_string_elastic(&pattern),
             uuid
         );
@@ -89,13 +122,23 @@ pub fn bulk_api(
     }
     let client = reqwest::blocking::Client::new();
     loop {
-        let res: response::BulkResponse = client
+        let res_raw = client
             .post("http://0.0.0.0:9200/_bulk?refresh=wait_for")
             .basic_auth("elastic", Some("changeme"))
             .header(reqwest::header::CONTENT_TYPE, "application/x-ndjson")
             .body(req_body.clone())
-            .send()?
-            .json()?;
+            .send()?;
+        // .json()?;
+        let text: serde_json::Value = res_raw.json()?;
+        let res: response::BulkResponse = match serde_json::from_value(text.clone()) {
+            Ok(r) => r,
+            Err(e) => {
+                println!("{:?}", e);
+                println!("{:?}", text.to_string());
+                // println!("{:?}", req_body.to_string());
+                return Err(e.into());
+            }
+        };
         match res.contains_errors() {
             true => match res.has_bulk_rejection_errors() {
                 Some(errors) => {
@@ -212,6 +255,9 @@ mod response {
         pub fn is_bulk_rejection(&self) -> bool {
             self.reason == "es_rejected_execution_exception"
         }
+        pub fn _resource_already_exists_exception(&self) -> bool {
+            self.reason == "resource_already_exists_exception"
+        }
     }
     impl Serialize for BulkResponse {
         fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
@@ -229,37 +275,38 @@ mod response {
         }
     }
 }
-mod mapping {
-    use crate::type_map::TypeMap;
-    // use std::{collections::BTreeMap, fmt};
-    //
-    //
-    // Replace with serialiser
-    pub fn as_elastic_map(map: &TypeMap) -> String {
-        return format!("{{\"mappings\":{}}}", recurse(map));
-        fn recurse(t: &TypeMap) -> String {
-            match t {
-                        TypeMap::Null => String::from("{\"type\": \"keyword\",\"null_value\": \"NULL\"}"),
-                        TypeMap::Boolean => String::from("{\"type\": \"boolean\"}"),
-                        TypeMap::UnsignedInteger => String::from("{\"type\": \"unsigned_long\"}"),
-                        TypeMap::SignedInteger => String::from("{\"type\": \"long\"}"),
-                        TypeMap::Double => String::from("{\"type\": \"double\"}"),
-                        TypeMap::IPv4 => String::from("{\"type\": \"ip\"}"),
-                        TypeMap::IPv6 => String::from("{\"type\": \"ip\"}"),
-                        TypeMap::Date => String::from("{\"type\": \"date\", \"format\": \"yyyy-MM-dd HH:mm:ss||yyyy-MM-dd||epoch_millis||date_optional_time||basic_ordinal_date_time\"}"),
-                        TypeMap::String => String::from("{\"type\": \"text\", \"fields\": {\"keyword\": {\"type\": \"keyword\", \"ignore_above\": 256}}}"), 
-                        TypeMap::Array(_) => {
-                            String::from("{\"type\": \"text\", \"fields\": {\"keyword\": {\"type\": \"keyword\", \"ignore_above\": 256}}}")
-                        },
-                        TypeMap::Object(ref m) => {
-                            let mut string = String::new();
-                            for (k, v) in m {
-                                string.push_str(&format!("{{\"{}\": {} }}", k, recurse(v)));
-                                // map.insert(k.to_string(), String::new(format!("{{\"properties\":{}}}", recurse(v.clone()))));
-                            }
-                            format!("{{\"properties\":{}}}", string)
-                        },
-                    }
-        }
-    }
-}
+// mod mapping {
+//     use type_casting::ElasticTypes as TypeMap;
+//     // use std::{collections::BTreeMap, fmt};
+//     //
+//     //
+//     // Replace with serialiser
+//     pub fn as_elastic_map(map: &TypeMap) -> String {
+//         return format!("{{\"mappings\":{}}}", recurse(map));
+//         fn recurse(t: &TypeMap) -> String {
+//             match t {
+//                         TypeMap::Null => String::from("{\"type\": \"keyword\",\"null_value\": \"NULL\"}"),
+//                         TypeMap::Bool => String::from("{\"type\": \"boolean\"}"),
+//                         TypeMap::UnsignedInteger => String::from("{\"type\": \"unsigned_long\"}"),
+//                         TypeMap::SignedInteger => String::from("{\"type\": \"long\"}"),
+//                         TypeMap::Double => String::from("{\"type\": \"double\"}"),
+//                         TypeMap::IPv4 => String::from("{\"type\": \"ip\"}"),
+//                         TypeMap::IPv6 => String::from("{\"type\": \"ip\"}"),
+//                         TypeMap::Date => String::from("{\"type\": \"date\", \"format\": \"yyyy-MM-dd HH:mm:ss||yyyy-MM-dd||epoch_millis||date_optional_time||basic_ordinal_date_time\"}"),
+//                         TypeMap::String => String::from("{\"type\": \"text\", \"fields\": {\"keyword\": {\"type\": \"keyword\", \"ignore_above\": 256}}}"),
+//                         TypeMap::Array(_) => {
+//                             String::from("{\"type\": \"text\", \"fields\": {\"keyword\": {\"type\": \"keyword\", \"ignore_above\": 256}}}")
+//                         },
+//                         TypeMap::Object(ref m) => {
+//                             let mut parts: Vec<String> = Vec::new();
+//                             for (k, v) in m {
+//                                 parts.push(format!("\"{}\": {} ", k, recurse(v)));
+//                                 // map.insert(k.to_string(), String::new(format!("{{\"properties\":{}}}", recurse(v.clone()))));
+//                             }
+//                             // let string = parts.join(",");
+//                             format!("{{\"properties\": {{{}}}}}", parts.join(","))
+//                         },
+//                     }
+//         }
+//     }
+// }

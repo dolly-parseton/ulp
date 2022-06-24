@@ -61,6 +61,7 @@ impl Parser {
             writeln!(&mut self.data_file, "{}", json)
                 .map_err(|e| CustomError::ParserRunError(e.into()))?;
             // Generate type map
+            // Move lock from parser to inside the mapping, arc mutex contents and build into methods
             match self.mapping_ref.lock() {
                 Ok(mut mapping) => {
                     mapping.map_json(&json, &pattern);
