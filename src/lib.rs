@@ -32,7 +32,7 @@ lazy_static! {
         env::var(ELASTIC_USER_ENV).unwrap_or_else(|_| "elastic:changeme".to_string());
 }
 
-#[derive(serde::Serialize, Debug, Clone, Eq, PartialEq, Hash)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Eq, PartialEq, Hash)]
 pub enum Parser {
     Evtx,
     Mft,
@@ -42,6 +42,16 @@ pub enum Parser {
 impl Default for Parser {
     fn default() -> Self {
         Self::None
+    }
+}
+
+impl Parser {
+    pub fn default_index_pattern(&self) -> &'static str {
+        match self {
+            Parser::Evtx => "evtx_{{Event.System.Provider_attributes.Name}}",
+            Parser::Mft => "mft",
+            Parser::None => "none",
+        }
     }
 }
 
@@ -69,14 +79,13 @@ impl Parser {
                 debug!("Creating MFT Parser");
                 let mut mft: mft::Parser = TryFrom::try_from(task).unwrap();
                 debug!("Running MFT Parser");
-                mft.run("pattern".into()).unwrap();
+                mft.run(self.default_index_pattern().into()).unwrap();
             }
             Self::Evtx => {
                 debug!("Creating EVTX Parser");
                 let mut evtx: evtx::Parser = TryFrom::try_from(task).unwrap();
                 debug!("Running EVTX Parser");
-                evtx.run("evtx_{{Event.System.Provider_attributes.Name}}".into())
-                    .unwrap();
+                evtx.run(self.default_index_pattern().into()).unwrap();
             }
             _ => panic!("No Parser for this file"),
         }

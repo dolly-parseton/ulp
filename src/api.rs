@@ -29,7 +29,7 @@ pub fn routes(
         .and_then(handlers::job::get);
     let job_post = warp::path!("job")
         .and(message_queue.clone().into_warp())
-        .and(job_post_body())
+        .and(string_post_body())
         .and(warp::post())
         .and_then(handlers::job::post);
     let job_delete = warp::path!("job")
@@ -39,7 +39,7 @@ pub fn routes(
     // Elastic
     let elastic_post = warp::path!("elastic")
         .and(message_queue.clone().into_warp())
-        .and(job_post_body())
+        .and(string_post_body())
         .and(warp::post())
         .and_then(handlers::job::post); // Reuse same route
     job_get.or(job_post).or(job_delete).or(elastic_post)
@@ -52,7 +52,15 @@ impl Reject for CustomError {}
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct PostString(pub String);
 
-pub fn job_post_body() -> impl Filter<Extract = (PostString,), Error = warp::Rejection> + Clone {
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct PostJson(pub serde_json::Value);
+
+pub fn string_post_body() -> impl Filter<Extract = (PostString,), Error = warp::Rejection> + Clone {
+    // When accepting a body, we want a JSON body
+    // (and to reject huge payloads)...
+    warp::body::content_length_limit(1024 * 16).and(warp::body::json())
+}
+pub fn json_post_body() -> impl Filter<Extract = (PostJson,), Error = warp::Rejection> + Clone {
     // When accepting a body, we want a JSON body
     // (and to reject huge payloads)...
     warp::body::content_length_limit(1024 * 16).and(warp::body::json())

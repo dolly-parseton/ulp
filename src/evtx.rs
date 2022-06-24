@@ -49,7 +49,7 @@ impl Parser {
             // Read in json object
             let json = record.map_err(|e| CustomError::ParserRunError(e.into()))?;
             // Write to file
-            writeln!(&mut self.data_file, "{}", json.data.to_string())
+            writeln!(&mut self.data_file, "{}", json.data)
                 .map_err(|e| CustomError::ParserRunError(e.into()))?;
             // Generate type mapping
             match self.mapping_ref.lock() {
