@@ -9,6 +9,7 @@ pub mod error;
 pub mod evtx;
 pub mod job;
 pub mod mft;
+pub mod plugins;
 pub mod type_map;
 pub mod workerpool;
 

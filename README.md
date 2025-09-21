@@ -29,6 +29,9 @@ Below is a table of features, both currently implemented and to be implemented.
 | EVTX Parsing | Yes! :) |
 | Elastic Search Ingestion[^1] | Yes! :) |
 | Elastic Search Indexing[^1] | Yes! :) |
+| **Plugin System** | **Partial! :/** |
+| **Syslog Output** | **Partial! :/** |
+| **Vector.dev Output** | **Partial! :/** |
 | WinReg Parsing | No :( |
 | Docker File / Compose[^2] | Partial! :/ |
 | Enviroment Variables | Partial! :/ |
@@ -45,6 +48,33 @@ Below is a table of features, both currently implemented and to be implemented.
 [^2]: Still need to sort out enviroment variables and ensure they're being used properly by ULP.
 [^3]: Pattern string (ie. `evtx_{{Event.System.ProviderName}}`) parsing is implimented but the mechanism of passing them through to parsing jobs isn't supported. A redesign of the input methods is required, simple but will take time.
 [^4]: Expect more options on parsing and grouping elastic jobs, combining index maps is supported so in future having data from different artifacts in the same file will be possible if needed. Additionally more data that can be submitted via the API 
+
+## Roadmap & Extensibility
+
+ULP now includes comprehensive documentation for future development and extensibility:
+
+- **[📋 Roadmap](docs/ROADMAP.md)**: Detailed development roadmap with planned features and forensic artifacts
+- **[🏗️ Architecture](docs/ARCHITECTURE.md)**: System architecture documentation and extensibility patterns  
+- **[🔌 Plugin Development](docs/PLUGIN_DEVELOPMENT.md)**: Complete guide for developing parser and output plugins
+
+### New Output Methods
+
+ULP is being extended to support additional output methods beyond Elasticsearch:
+
+- **Syslog Output**: RFC 3164/5424 compliant syslog integration (UDP/TCP/TLS)
+- **Vector.dev Integration**: Native Vector HTTP API support with batching
+- **Future Outputs**: Kafka, PostgreSQL, S3, and more planned
+
+### Planned Forensic Artifacts
+
+The roadmap includes support for additional forensic artifacts:
+- Windows Registry (WinReg) parsing
+- Windows Event Trace Logs (ETL/ETW) 
+- Prefetch files (.pf)
+- Memory dumps analysis
+- Unix/Linux system logs
+- Web server logs (Apache, Nginx, IIS)
+- Network artifacts (PCAP, NetFlow)
 
 Plenty more to add as this project grows.
 

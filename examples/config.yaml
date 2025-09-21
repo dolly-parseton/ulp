@@ -1,0 +1,142 @@
+# ULP Configuration Example
+# This configuration demonstrates the planned plugin system architecture
+
+# Parser configurations
+parsers:
+  evtx:
+    enabled: true
+    batch_size: 1000
+    extract_metadata: true
+    custom_patterns:
+      security: "evtx_security_{{Event.System.EventID}}"
+      system: "evtx_system_{{Event.System.Provider_attributes.Name}}"
+  
+  mft:
+    enabled: true
+    include_deleted: false
+    parse_ads: true  # Alternate Data Streams
+    extract_timeline: true
+  
+  # Future parsers
+  winreg:
+    enabled: false
+    hive_types: ["SYSTEM", "SOFTWARE", "SAM", "SECURITY"]
+    export_format: "json"
+  
+  prefetch:
+    enabled: false
+    extract_metadata: true
+    include_file_paths: true
+
+# Output configurations  
+outputs:
+  # Existing Elasticsearch output
+  elasticsearch:
+    enabled: true
+    hosts: ["localhost:9200"]
+    username: "elastic"
+    password: "changeme"
+    bulk_size: 5000
+    index_prefix: "ulp-"
+    
+  # New Syslog output
+  syslog:
+    enabled: true
+    host: "syslog.example.com"
+    port: 514
+    facility: 16  # local0
+    transport: "udp"  # udp, tcp, tls
+    hostname: "ulp-forensics"
+    format: "rfc3164"  # rfc3164, rfc5424
+    
+  # New Vector.dev output
+  vector:
+    enabled: true
+    endpoint: "http://vector:8080/v1/logs"
+    api_key: "${VECTOR_API_KEY}"
+    batch_size: 1000
+    compression: "gzip"  # none, gzip, lz4
+    timeout: 30
+    
+  # Future outputs
+  kafka:
+    enabled: false
+    bootstrap_servers: ["kafka1:9092", "kafka2:9092"]
+    topic: "forensic-logs"
+    partition_key: "source_type"
+    
+  s3:
+    enabled: false
+    bucket: "forensic-logs"
+    region: "us-west-2"
+    prefix: "ulp/year={{year}}/month={{month}}/day={{day}}/"
+    format: "parquet"
+
+# Routing rules - determine which outputs receive which data
+routing:
+  rules:
+    # High-priority security events go to all outputs
+    - filter:
+        parser: "evtx"
+        event_id: [4624, 4625, 4648, 4672]  # Logon events
+      outputs: ["elasticsearch", "syslog", "vector"]
+      
+    # MFT events go to elasticsearch and vector for analysis
+    - filter:
+        parser: "mft"
+      outputs: ["elasticsearch", "vector"]
+      
+    # Error level events always go to syslog
+    - filter:
+        level: "ERROR"
+      outputs: ["syslog", "elasticsearch"]
+      
+    # Default: everything goes to elasticsearch
+    - filter: {}
+      outputs: ["elasticsearch"]
+
+# Transform/enrichment configurations
+transforms:
+  - name: "geoip_enrichment"
+    enabled: true
+    config:
+      database_path: "/opt/ulp/GeoLite2-City.mmdb"
+      fields: ["src_ip", "dst_ip"]
+      
+  - name: "field_rename"
+    enabled: true
+    config:
+      mappings:
+        "Event.System.Provider_attributes.Name": "provider_name"
+        "Event.System.EventID": "event_id"
+        "Event.System.TimeCreated_attributes.SystemTime": "timestamp"
+
+# Performance and operational settings
+performance:
+  workers: 8
+  memory_limit: "2GB"
+  temp_dir: "/tmp/ulp"
+  max_file_size: "1GB"
+  
+logging:
+  level: "info"  # error, warn, info, debug, trace
+  format: "json"
+  file: "/var/log/ulp/ulp.log"
+  max_size: "100MB"
+  max_files: 10
+
+# Security settings
+security:
+  api_key_required: true
+  rate_limit:
+    requests_per_minute: 1000
+  tls:
+    cert_file: "/etc/ulp/tls/cert.pem"
+    key_file: "/etc/ulp/tls/key.pem"
+
+# Development/debugging options
+development:
+  enable_metrics: true
+  metrics_port: 9090
+  profiling: false
+  hot_reload: false
